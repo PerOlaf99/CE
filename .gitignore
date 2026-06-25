@@ -1,0 +1,11 @@
+env/
+__pycache__/
+*.pyc
+training_data/
+training_data_mb4000/
+training_data/mb4000_v2/
+base_caller_model.keras
+*.npz
+*.h5
+deep-learning-peak-detection-main.zip
+quantified_multichannel_results.csv
