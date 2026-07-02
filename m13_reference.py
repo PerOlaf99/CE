@@ -28,75 +28,85 @@ def save_reference(dir_path):
 
 
 def align_to_reference(query, ref=None, gap_open=-10, gap_extend=-1, match=2, mismatch=-3):
-    """Smith-Waterman local alignment of query to M13 reference.
+    """Smith-Waterman local alignment of query to M13 reference using edlib.
     
     Returns dict with alignment info.
     """
     if ref is None:
         ref = M13_REFERENCE
     
-    m, n = len(query), len(ref)
-    score = np.zeros((m + 1, n + 1), dtype=np.int32)
+    # Use edlib for fast alignment
+    # edlib uses NW/SW: task='path' gives CIGAR
+    # Set mode='NW' for global, 'HW' for infix, 'SH' for prefix/suffix
+    query_clean = ''.join(c for c in query if c in 'ACGT')
     
-    # Traceback: 0=stop, 1=diag, 2=up, 3=left
-    trace = np.zeros((m + 1, n + 1), dtype=np.uint8)
+    result = edlib.align(query_clean, ref, mode='HW', task='path')
     
-    max_score = 0
-    max_i, max_j = 0, 0
+    if result['editDistance'] is None or result['locations'] is None:
+        return {
+            'query_start': 0, 'ref_start': 0,
+            'query_end': 0, 'ref_end': 0,
+            'aligned_length': 0, 'matches': 0,
+            'identity': 0.0,
+            'query_aligned': '', 'ref_aligned': '',
+            'score': 0,
+        }
     
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            match_score = match if query[i-1] == ref[j-1] else mismatch
-            
-            diag = score[i-1, j-1] + match_score
-            up = score[i-1, j] + (gap_extend if trace[i-1, j] == 2 else gap_open)
-            left = score[i, j-1] + (gap_extend if trace[i, j-1] == 3 else gap_open)
-            
-            scores = [0, diag, up, left]
-            best = np.argmax(scores)
-            score[i, j] = scores[best]
-            trace[i, j] = best
-            
-            if score[i, j] > max_score:
-                max_score = score[i, j]
-                max_i, max_j = i, j
+    # Get alignment details from CIGAR-like format
+    locations = result['locations'][0]
+    ref_start = locations[0]
+    ref_end = locations[1]
     
-    # Traceback
-    q_aligned, r_aligned = [], []
-    i, j = max_i, max_j
-    while trace[i, j] != 0 and score[i, j] > 0:
-        if trace[i, j] == 1:  # diag
-            q_aligned.append(query[i-1])
-            r_aligned.append(ref[j-1])
-            i -= 1
-            j -= 1
-        elif trace[i, j] == 2:  # up (gap in ref)
-            q_aligned.append(query[i-1])
-            r_aligned.append('-')
-            i -= 1
-        else:  # left (gap in query)
-            q_aligned.append('-')
-            r_aligned.append(ref[j-1])
-            j -= 1
+    # Build aligned sequences from edlib result
+    # edlib gives us the CIGAR string - decode it
+    cigar = result['cigar']
     
-    q_aligned = ''.join(reversed(q_aligned))
-    r_aligned = ''.join(reversed(r_aligned))
+    q_aligned_parts = []
+    r_aligned_parts = []
+    q_pos = 0
+    r_pos = ref_start
     
-    # Compute identity
+    # Parse CIGAR: each entry is (length, type) where type is
+    # 0=match, 1=insertion, 2=deletion
+    cig_types = []
+    cig_lengths = []
+    
+    i = 0
+    while i < len(cigar):
+        # Each element is a tuple (length, type)
+        length, typ = cigar[i]
+        if typ == 0:  # match/mismatch
+            q_aligned_parts.append(query_clean[q_pos:q_pos + length])
+            r_aligned_parts.append(ref[r_pos:r_pos + length])
+            q_pos += length
+            r_pos += length
+        elif typ == 1:  # insertion (gap in ref)
+            q_aligned_parts.append(query_clean[q_pos:q_pos + length])
+            r_aligned_parts.append('-' * length)
+            q_pos += length
+        else:  # deletion (gap in query)
+            q_aligned_parts.append('-' * length)
+            r_aligned_parts.append(ref[r_pos:r_pos + length])
+            r_pos += length
+        i += 1
+    
+    q_aligned = ''.join(q_aligned_parts)
+    r_aligned = ''.join(r_aligned_parts)
+    
     matches = sum(1 for a, b in zip(q_aligned, r_aligned) if a == b)
     identity = matches / len(q_aligned) if q_aligned else 0
     
     return {
-        'query_start': i,
-        'ref_start': j,
-        'query_end': max_i,
-        'ref_end': max_j,
+        'query_start': 0,
+        'ref_start': ref_start,
+        'query_end': q_pos,
+        'ref_end': ref_end,
         'aligned_length': len(q_aligned),
         'matches': matches,
         'identity': identity,
         'query_aligned': q_aligned,
         'ref_aligned': r_aligned,
-        'score': max_score,
+        'score': -result['editDistance'],
     }
 
 
