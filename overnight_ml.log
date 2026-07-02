@@ -10,3 +10,7 @@
 [22:25:57] 
 === RF LOTO: raw ===
 [22:25:57]   LOTO RF: 96 wells, X (83266, 31, 4), 500 trees
+[01:19:58]   LOTO RF done in 10441s, mean acc=90.7%
+[01:19:58] 
+=== RF LOTO: well_zscore ===
+[01:19:58]   LOTO RF: 96 wells, X (83266, 31, 4), 500 trees
