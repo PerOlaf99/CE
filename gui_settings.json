@@ -1,5 +1,5 @@
 {
-  "height": 5000,
+  "height": 200,
   "prominence": 50,
   "distance": 5,
   "min_width": 2,
@@ -14,13 +14,13 @@
   "detection": 0,
   "channels": {
     "Channel1": false,
-    "Channel2": false,
+    "Channel2": true,
     "Channel3": true,
     "Channel4": false,
     "Current": false
   },
   "window_x": 66,
   "window_y": 69,
-  "window_w": 1848,
+  "window_w": 1854,
   "window_h": 1011
 }
