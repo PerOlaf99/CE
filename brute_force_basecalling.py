@@ -82,7 +82,9 @@ def load_m13_training_data(base_dir, data_subdir='MB1000_M13_DT',
             except:
                 continue
             seq = esd.get('sequence', '')
-            positions = esd.get('peak_positions') or esd.get('bases_positions')
+            positions = esd.get('peak_positions')
+            if positions is None:
+                positions = esd.get('bases_positions')
             quality = esd.get('quality_scores')
             if not seq or positions is None:
                 continue
