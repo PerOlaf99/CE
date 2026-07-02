@@ -1,6 +1,7 @@
 """M13mp18 reference sequence for alignment and evaluation."""
 import os
 import numpy as np
+import edlib
 
 M13_REFERENCE = (
     "tgccaagcttgcatgcctgcaggtcgactctagaggatccccgggtaccgagctcgaattcgta"
