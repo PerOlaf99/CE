@@ -3,3 +3,15 @@
 [22:25:32] Wells: 96 unique
 [22:25:32] After dropping N: X (83266, 31, 4), y distribution: {0: 21604, 1: 20018, 2: 23314, 3: 18330}
 [22:25:32] Preparing normalized datasets...
+[22:25:36] Normalization done in 4s
+[22:25:36] 
+=== Quick sanity: RF on A01 with z-score ===
+[22:25:41] RF 5-fold CV on A01 (well_zscore): 96.4%
+[22:25:41] 
+=== M13 Evaluation ===
+[22:25:41] 
+============================================================
+[22:25:41] SUMMARY
+[22:25:41] ============================================================
+[22:25:41] 
+Results saved to overnight_results.json
