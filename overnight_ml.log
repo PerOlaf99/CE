@@ -3,3 +3,10 @@
 [22:25:48] Wells: 96 unique
 [22:25:48] After dropping N: X (83266, 31, 4), y distribution: {0: 21604, 1: 20018, 2: 23314, 3: 18330}
 [22:25:48] Preparing normalized datasets...
+[22:25:52] Normalization done in 4s
+[22:25:52] 
+=== Quick sanity: RF on A01 with z-score ===
+[22:25:57] RF 5-fold CV on A01 (well_zscore): 96.4%
+[22:25:57] 
+=== RF LOTO: raw ===
+[22:25:57]   LOTO RF: 96 wells, X (83266, 31, 4), 500 trees
