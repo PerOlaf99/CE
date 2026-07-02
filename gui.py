@@ -392,7 +392,13 @@ class ElectropherogramApp(QMainWindow):
             return
         self._manual_peaks = {}
         for w, lst in data.get('manual_peaks', {}).items():
-            self._manual_peaks[w] = [(int(s), int(ch)) for s, ch in lst]
+            parsed = []
+            for s, ch in lst:
+                try:
+                    parsed.append((int(s), int(ch)))
+                except (ValueError, TypeError):
+                    parsed.append((int(s), str(ch)))
+            self._manual_peaks[w] = parsed
         self._deleted_peaks = {}
         for w, lst in data.get('deleted_peaks', {}).items():
             self._deleted_peaks[w] = set(int(x) for x in lst)
@@ -3319,21 +3325,32 @@ class ElectropherogramApp(QMainWindow):
             QMessageBox.critical(self, "Train Genotyping", f"Training failed:\n{e}")
 
     def _train_is_only(self):
-        """Train using only IS peaks CSV for the current folder
-        (no Genotyping.xlsx required — uses well_data for genotypes)."""
-        import joblib, glob, os
+        """Train using corrected IS peaks + Genotyping.xlsx ground truth or manual genotype."""
+        import joblib, os
         import numpy as np
         import pandas as pd
-        from run_is_genotyping import parse_rsd, find_is_peaks_for_well
-        from train_genotyping import extract_features_from_trace, LABEL_MAP, SCRIPT_DIR
+        from run_is_genotyping import parse_rsd
+        from train_genotyping import extract_features_from_trace, SCRIPT_DIR, parse_genotyping_xlsx, normalize_plate_name
 
         folder = self._current_folder
         if not folder:
             QMessageBox.warning(self, "Train IS", "No folder loaded.")
             return
         folder_name = os.path.basename(folder)
+        plate_name = normalize_plate_name(folder_name)
 
-        # Gather wells with exported IS peaks from well_data
+        # Load genotypes from Genotyping.xlsx
+        xlsx_path = os.path.join(SCRIPT_DIR, 'Genotyping.xlsx')
+        if os.path.exists(xlsx_path):
+            all_plates = parse_genotyping_xlsx(xlsx_path)
+        else:
+            alt = '/media/tv/Data (ScanDisk)/Genotyping.xlsx'
+            all_plates = parse_genotyping_xlsx(alt) if os.path.exists(alt) else {}
+        plate_gt = all_plates.get(plate_name, {})
+        if plate_gt:
+            print(f"Train IS: loaded {len(plate_gt)} genotypes from Genotyping.xlsx for {plate_name}")
+
+        # Gather wells with corrected IS peaks from well_data
         X_list, y_list = [], []
         feature_cols = None
 
@@ -3369,8 +3386,10 @@ class ElectropherogramApp(QMainWindow):
                 feature_cols = sorted([k for k in feats.keys() if k not in ('n_scans',)])
             row = [feats.get(f, 0.0) for f in feature_cols]
 
-            # Try to get genotype from well_data or from Genotyping.xlsx
+            # Genotype: well_data → Genotyping.xlsx → default het (4)
             gt = self._well_data.get(well, {}).get('genotype')
+            if gt is None:
+                gt = plate_gt.get(well)
             if gt is not None:
                 try:
                     y_list.append(int(gt))
@@ -3379,9 +3398,44 @@ class ElectropherogramApp(QMainWindow):
                     pass
 
         if len(X_list) < 5:
-            QMessageBox.warning(self, "Train IS",
-                                f"Not enough labeled wells ({len(X_list)}). Mark genotypes first.")
-            return
+            reply = QMessageBox.question(
+                self, "Train IS",
+                f"Only {len(X_list)} wells have genotypes from Genotyping.xlsx.\n"
+                "Assuming all wells are het (4) for this plate?\n"
+                "(Click Yes to label all IS-corrected wells as het and train)",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                for well in self._get_all_wells():
+                    wd = self._well_data.get(well)
+                    if wd is None:
+                        continue
+                    peaks = wd.get('peaks')
+                    pchs = wd.get('peak_channels', [])
+                    if peaks is None or len(peaks) < 2:
+                        continue
+                    ch3_scans = []
+                    for i, s in enumerate(peaks):
+                        ch = pchs[i] if i < len(pchs) else ''
+                        if ch == 'Channel3' or ch == 2:
+                            ch3_scans.append(int(s))
+                    if len(ch3_scans) < 2:
+                        continue
+                    rsd_path = os.path.join(folder, f"{well}.rsd")
+                    if not os.path.exists(rsd_path):
+                        continue
+                    df = parse_rsd(rsd_path)
+                    if len(df) < 50:
+                        continue
+                    ch3 = df['Channel3'].values.astype(float)
+                    ispk = [(s, float(ch3[s])) for s in ch3_scans if s < len(ch3)]
+                    feats = extract_features_from_trace(df, is_peaks=ispk)
+                    row = [feats.get(f, 0.0) for f in feature_cols]
+                    X_list.append(row)
+                    y_list.append(4)
+            else:
+                QMessageBox.warning(self, "Train IS",
+                                    "Not enough labeled wells. Train cancelled.")
+                return
 
         X = np.array(X_list)
         y = np.array(y_list)
@@ -3466,45 +3520,47 @@ class ElectropherogramApp(QMainWindow):
                                 f"No entries for current folder '{folder_name}' in CSV.")
             return
 
+        self._sync_detector_params()
         loaded = 0
         for well in folder_df['well'].unique():
             well_df = folder_df[folder_df['well'] == well]
-            peaks = []
+            is_peaks = []
             for col in ['is_peak_1_scan', 'is_peak_2_scan', 'is_peak_3_scan', 'is_peak_4_scan']:
                 vals = well_df[col].dropna().values
                 if len(vals) > 0:
                     try:
-                        peaks.append(int(float(vals[0])))
+                        is_peaks.append(int(float(vals[0])))
                     except (ValueError, TypeError):
                         continue
-            if len(peaks) < 2:
+            if len(is_peaks) < 2:
                 continue
-            wd = self._well_data.setdefault(well, {})
-            wd['peaks'] = np.array(sorted(peaks))
-            wd['peak_channels'] = ['Channel3'] * len(peaks)
-            lefts = np.array([max(0, p - 2) for p in peaks])
-            rights = np.array([p + 2 for p in peaks])
-            wd['peak_lefts'] = lefts
-            wd['peak_rights'] = rights
             rsd_path = os.path.join(self._current_folder, f"{well}.rsd")
-            if os.path.exists(rsd_path):
-                try:
-                    trace = parse_rsd(rsd_path)
-                    ch3 = trace['Channel3'].values.astype(float)
-                    wd['peak_heights'] = [float(ch3[p]) for p in peaks if p < len(ch3)]
-                    wd['scan_values'] = trace["Scan"]
-                    wd['channel_data'] = {
-                        'Channel1': trace['Channel1'].values.astype(float),
-                        'Channel2': trace['Channel2'].values.astype(float),
-                        'Channel3': ch3,
-                        'Channel4': trace['Channel4'].values.astype(float),
-                        'Current': trace['Current'].values.astype(float),
-                    }
-                except Exception:
-                    wd['peak_heights'] = [0.0] * len(peaks)
-            else:
-                wd['peak_heights'] = [0.0] * len(peaks)
-            loaded += 1
+            if not os.path.exists(rsd_path):
+                continue
+            try:
+                trace = parse_rsd(rsd_path)
+                scan = trace["Scan"]
+                wd = self.detector.detect(trace, scan)
+                wd['scan'] = scan
+                wd['scan_values'] = scan
+                wd['channel_data'] = {
+                    'Channel1': trace['Channel1'].values.astype(float),
+                    'Channel2': trace['Channel2'].values.astype(float),
+                    'Channel3': trace['Channel3'].values.astype(float),
+                    'Channel4': trace['Channel4'].values.astype(float),
+                    'Current': trace['Current'].values.astype(float),
+                }
+                # Override peaks with loaded IS peaks
+                ch3 = wd['channel_data']['Channel3']
+                wd['peaks'] = np.array(sorted(is_peaks))
+                wd['peak_channels'] = ['Channel3'] * len(is_peaks)
+                wd['peak_lefts'] = np.array([max(0, p - 2) for p in is_peaks])
+                wd['peak_rights'] = np.array([p + 2 for p in is_peaks])
+                wd['peak_heights'] = [float(ch3[p]) if p < len(ch3) else 0.0 for p in is_peaks]
+                self._well_data[well] = wd
+                loaded += 1
+            except Exception:
+                continue
 
         if loaded > 0:
             self.update_plot()

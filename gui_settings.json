@@ -1,5 +1,5 @@
 {
-  "height": 200,
+  "height": 5000,
   "prominence": 50,
   "distance": 5,
   "min_width": 2,
@@ -19,8 +19,8 @@
     "Channel4": false,
     "Current": false
   },
-  "window_x": 0,
-  "window_y": 0,
+  "window_x": 66,
+  "window_y": 69,
   "window_w": 1848,
-  "window_h": 1015
+  "window_h": 1011
 }
