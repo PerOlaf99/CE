@@ -3977,7 +3977,6 @@ class ElectropherogramApp(QMainWindow):
             return
 
         model = joblib.load(model_path)
-        ref_features = pd.read_csv(features_path)['feature'].tolist()
 
         folder_path = self._current_folder
         if not folder_path or not os.path.isdir(folder_path):
