@@ -1,8 +1,7 @@
 """Simple M13 alignment without edlib."""
-import re, difflib
 
 M13_REFERENCE = (
-    "TGCCAAGCTTGCA" + 
+    "TGCCAAGCTTGCA"
     "TGCCTGCAGGTCGACTCTAGAGGATCCCCGGGTACCGAGCTCGAATTCGTA"
     "ATCATGGTCATAGCTGTTTCCTGTGTGAAATTGTTATCCGCTCACAATTCCACACAACATACGAG"
     "CCGGAAGCATAAGTGTAAAGCCTGGGGTGCCTAATGAGTGAGCTAACTCACATTAATTGCGTTG"
@@ -19,33 +18,55 @@ M13_REFERENCE = (
 ).upper()
 
 
-def align_to_m13(query):
-    """Simple alignment of query to M13 reference.
-    Uses longest contiguous match, then extends.
-    """
+def _nw_align(q, r, match=1, mismatch=-1, gap=-2):
+    """Needleman-Wunsch global alignment, returns (score, matches, length)."""
+    m, n = len(q), len(r)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        dp[i][0] = dp[i - 1][0] + gap
+    for j in range(1, n + 1):
+        dp[0][j] = dp[0][j - 1] + gap
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            diag = dp[i - 1][j - 1] + (match if q[i - 1] == r[j - 1] else mismatch)
+            up = dp[i - 1][j] + gap
+            left = dp[i][j - 1] + gap
+            dp[i][j] = max(diag, up, left)
+    # Traceback
+    i, j = m, n
+    matches = 0
+    alen = 0
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + (match if q[i - 1] == r[j - 1] else mismatch):
+            if q[i - 1] == r[j - 1]:
+                matches += 1
+            alen += 1
+            i -= 1
+            j -= 1
+        elif i > 0 and dp[i][j] == dp[i - 1][j] + gap:
+            alen += 1
+            i -= 1
+        else:
+            alen += 1
+            j -= 1
+    return dp[m][n], matches, alen
+
+
+def align_to_m13(query, ref=None):
+    """Needleman-Wunsch global alignment of query to M13 reference."""
+    if ref is None:
+        ref = M13_REFERENCE
     q = ''.join(c for c in query if c in 'ACGT')
     if len(q) < 20:
         return None
-
-    # Find best match location using longest common substring
-    sm = difflib.SequenceMatcher(None, q, M13_REFERENCE, autojunk=False)
-    match = sm.find_longest_match(0, len(q), 0, len(M13_REFERENCE))
-
-    if match.size < 20:
-        return None
-
-    q_start, ref_start, length = match
-    q_matched = q[q_start:q_start + length]
-    ref_matched = M13_REFERENCE[ref_start:ref_start + length]
-
-    matches = sum(1 for a, b in zip(q_matched, ref_matched) if a == b)
-
+    score, matches, alen = _nw_align(q, ref)
     return {
         'matches': matches,
-        'alignment_length': length,
-        'query_start': q_start,
-        'ref_start': ref_start,
-        'identity': matches / length * 100 if length > 0 else 0,
+        'alignment_length': alen,
+        'score': score,
+        'identity': matches / alen * 100 if alen > 0 else 0,
+        'query_length': len(q),
+        'ref_length': len(ref),
     }
 
 
