@@ -236,7 +236,7 @@ def main():
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.model_selection import StratifiedKFold
     from sklearn.metrics import accuracy_score
-    rf = RandomForestClassifier(200, 12, class_weight='balanced', n_jobs=-1, random_state=42)
+    rf = RandomForestClassifier(n_estimators=200, max_depth=12, class_weight='balanced', n_jobs=-1, random_state=42)
     Xz = datasets['well_zscore']
     scores = []
     skf = StratifiedKFold(5, shuffle=True, random_state=42)
@@ -340,7 +340,7 @@ def main():
         X_flat = Xz.reshape(Xz.shape[0], -1)
         if method.startswith('rf'):
             from sklearn.ensemble import RandomForestClassifier
-            model = RandomForestClassifier(500, 12, class_weight='balanced', n_jobs=-1, random_state=42)
+            model = RandomForestClassifier(n_estimators=500, max_depth=12, class_weight='balanced', n_jobs=-1, random_state=42)
         else:
             import xgboost as xgb
             model = xgb.XGBClassifier(500, 8, learning_rate=0.1, subsample=0.8, colsample_bytree=0.8, n_jobs=-1, random_state=42, verbosity=0)
