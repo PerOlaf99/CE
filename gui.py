@@ -3324,6 +3324,91 @@ class ElectropherogramApp(QMainWindow):
             self.status_label.setText("")
             QMessageBox.critical(self, "Train Genotyping", f"Training failed:\n{e}")
 
+    def _extract_simple_features(self, df, is_peaks):
+        """Extract a compact feature set (30 features instead of 175)."""
+        import numpy as np
+        from scipy.stats import skew, kurtosis
+        from scipy.signal import find_peaks
+
+        feats = {}
+        ch3 = df['Channel3'].values.astype(float)
+        noise_ch3 = np.std(ch3[:200]) if len(ch3) > 200 else max(np.std(ch3), 1e-10)
+
+        # IS peak features
+        if is_peaks and len(is_peaks) >= 2:
+            scans = sorted([s for s, _ in is_peaks])
+            heights = [float(ch3[s]) if s < len(ch3) else 0.0 for s in scans]
+            for i in range(min(4, len(scans))):
+                feats[f'IS_{i+1}_scan'] = scans[i]
+                feats[f'IS_{i+1}_hgt'] = heights[i]
+            for i in range(len(scans), 4):
+                feats[f'IS_{i+1}_scan'] = 0
+                feats[f'IS_{i+1}_hgt'] = 0.0
+            feats['IS_n'] = len(scans)
+            feats['IS_spread'] = scans[-1] - scans[0]
+            feats['IS_mean_hgt'] = float(np.mean(heights))
+        else:
+            for i in range(1, 5):
+                feats[f'IS_{i}_scan'] = 0
+                feats[f'IS_{i}_hgt'] = 0.0
+            feats['IS_n'] = 0
+            feats['IS_spread'] = 0
+            feats['IS_mean_hgt'] = 0.0
+
+        # Ch1 and Ch2 trace stats + strongest peak
+        for ch_name in ('Channel1', 'Channel2'):
+            y = df[ch_name].values.astype(float)
+            feats[f'{ch_name}_mean'] = float(np.mean(y))
+            feats[f'{ch_name}_std'] = float(np.std(y))
+            feats[f'{ch_name}_max'] = float(np.max(y))
+            feats[f'{ch_name}_min'] = float(np.min(y))
+            feats[f'{ch_name}_energy'] = float(np.sum(y ** 2))
+
+            noise = np.std(y[:200]) if len(y) > 200 else max(np.std(y), 1e-10)
+            threshold = max(50, 3 * noise)
+            try:
+                p, props = find_peaks(y, height=threshold, prominence=threshold * 0.5,
+                                      distance=5, width=1)
+                if len(p) > 0:
+                    h = props['peak_heights']
+                    idx = int(p[np.argmax(h)])
+                    feats[f'{ch_name}_max_peak_scan'] = idx
+                    feats[f'{ch_name}_max_peak_hgt'] = float(np.max(h))
+                    feats[f'{ch_name}_n_peaks'] = len(p)
+                else:
+                    feats[f'{ch_name}_max_peak_scan'] = 0
+                    feats[f'{ch_name}_max_peak_hgt'] = 0.0
+                    feats[f'{ch_name}_n_peaks'] = 0
+            except Exception:
+                feats[f'{ch_name}_max_peak_scan'] = 0
+                feats[f'{ch_name}_max_peak_hgt'] = 0.0
+                feats[f'{ch_name}_n_peaks'] = 0
+
+        # Ch3 (IS) basic stats
+        feats['Channel3_mean'] = float(np.mean(ch3))
+        feats['Channel3_std'] = float(np.std(ch3))
+        feats['Channel3_noise'] = float(noise_ch3)
+
+        # IS/ch2 ratio features
+        if is_peaks and len(is_peaks) >= 2:
+            ch2 = df['Channel2'].values.astype(float)
+            ratios = []
+            for s, _ in is_peaks:
+                si = int(s)
+                if si < len(ch3) and si < len(ch2) and ch2[si] > 10:
+                    ratios.append(ch3[si] / ch2[si])
+            if ratios:
+                feats['IS_Ch2_ratio_mean'] = float(np.mean(ratios))
+                feats['IS_Ch2_ratio_min'] = float(np.min(ratios))
+            else:
+                feats['IS_Ch2_ratio_mean'] = 0.0
+                feats['IS_Ch2_ratio_min'] = 0.0
+        else:
+            feats['IS_Ch2_ratio_mean'] = 0.0
+            feats['IS_Ch2_ratio_min'] = 0.0
+
+        return feats
+
     def _train_is_only(self):
         """Train using corrected IS peaks + Genotyping.xlsx ground truth or manual genotype."""
         import joblib, os
