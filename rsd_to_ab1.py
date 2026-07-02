@@ -90,13 +90,13 @@ def write_ab1(filename, trace_a, trace_c, trace_g, trace_t,
 
     if basecalls:
         bc = basecalls.encode('ascii')
-        dirs.append(DirEntry("PBAS", 1, 2, 1, len(bc), bc))
+        dirs.append(DirEntry("PBAS", 2, 2, 1, len(bc), bc))
         if quality_values is not None:
             qv = bytes(int(v) for v in quality_values)
-            dirs.append(DirEntry("PCON", 1, 1, 1, len(qv), qv))
+            dirs.append(DirEntry("PCON", 2, 1, 1, len(qv), qv))
         if peak_locations is not None:
             pl = struct.pack(f'>{len(peak_locations)}h', *(int(p) for p in peak_locations))
-            dirs.append(DirEntry("PLOC", 1, 4, 2, len(peak_locations), pl))
+            dirs.append(DirEntry("PLOC", 2, 4, 2, len(peak_locations), pl))
 
     data_dirs = [d for d in dirs if not d.is_inline]
     total_data_size = sum(d.data_size for d in data_dirs)
