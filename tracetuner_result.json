@@ -1,0 +1,354 @@
+[
+  {
+    "well": "A01",
+    "identity": 100.0
+  },
+  {
+    "well": "A02",
+    "identity": 100.0
+  },
+  {
+    "well": "A04",
+    "identity": 100.0
+  },
+  {
+    "well": "A06",
+    "identity": 100.0
+  },
+  {
+    "well": "A07",
+    "identity": 100.0
+  },
+  {
+    "well": "A08",
+    "identity": 100.0
+  },
+  {
+    "well": "A09",
+    "identity": 100.0
+  },
+  {
+    "well": "A10",
+    "identity": 100.0
+  },
+  {
+    "well": "A11",
+    "identity": 100.0
+  },
+  {
+    "well": "A12",
+    "identity": 100.0
+  },
+  {
+    "well": "B01",
+    "identity": 100.0
+  },
+  {
+    "well": "B02",
+    "identity": 100.0
+  },
+  {
+    "well": "B03",
+    "identity": 100.0
+  },
+  {
+    "well": "B04",
+    "identity": 100.0
+  },
+  {
+    "well": "B05",
+    "identity": 100.0
+  },
+  {
+    "well": "B06",
+    "identity": 100.0
+  },
+  {
+    "well": "B07",
+    "identity": 100.0
+  },
+  {
+    "well": "B08",
+    "identity": 100.0
+  },
+  {
+    "well": "B09",
+    "identity": 100.0
+  },
+  {
+    "well": "B10",
+    "identity": 100.0
+  },
+  {
+    "well": "B11",
+    "identity": 100.0
+  },
+  {
+    "well": "B12",
+    "identity": 100.0
+  },
+  {
+    "well": "C01",
+    "identity": 100.0
+  },
+  {
+    "well": "C03",
+    "identity": 100.0
+  },
+  {
+    "well": "C05",
+    "identity": 100.0
+  },
+  {
+    "well": "C06",
+    "identity": 100.0
+  },
+  {
+    "well": "C08",
+    "identity": 100.0
+  },
+  {
+    "well": "C09",
+    "identity": 100.0
+  },
+  {
+    "well": "C10",
+    "identity": 100.0
+  },
+  {
+    "well": "C11",
+    "identity": 100.0
+  },
+  {
+    "well": "C12",
+    "identity": 100.0
+  },
+  {
+    "well": "D01",
+    "identity": 100.0
+  },
+  {
+    "well": "D02",
+    "identity": 100.0
+  },
+  {
+    "well": "D03",
+    "identity": 100.0
+  },
+  {
+    "well": "D04",
+    "identity": 100.0
+  },
+  {
+    "well": "D05",
+    "identity": 100.0
+  },
+  {
+    "well": "D06",
+    "identity": 100.0
+  },
+  {
+    "well": "D07",
+    "identity": 100.0
+  },
+  {
+    "well": "D08",
+    "identity": 100.0
+  },
+  {
+    "well": "D09",
+    "identity": 100.0
+  },
+  {
+    "well": "D10",
+    "identity": 100.0
+  },
+  {
+    "well": "D11",
+    "identity": 100.0
+  },
+  {
+    "well": "D12",
+    "identity": 100.0
+  },
+  {
+    "well": "E01",
+    "identity": 100.0
+  },
+  {
+    "well": "E02",
+    "identity": 100.0
+  },
+  {
+    "well": "E03",
+    "identity": 100.0
+  },
+  {
+    "well": "E04",
+    "identity": 100.0
+  },
+  {
+    "well": "E06",
+    "identity": 100.0
+  },
+  {
+    "well": "E07",
+    "identity": 100.0
+  },
+  {
+    "well": "E08",
+    "identity": 100.0
+  },
+  {
+    "well": "E09",
+    "identity": 100.0
+  },
+  {
+    "well": "E10",
+    "identity": 100.0
+  },
+  {
+    "well": "E11",
+    "identity": 100.0
+  },
+  {
+    "well": "E12",
+    "identity": 100.0
+  },
+  {
+    "well": "F01",
+    "identity": 100.0
+  },
+  {
+    "well": "F03",
+    "identity": 100.0
+  },
+  {
+    "well": "F04",
+    "identity": 100.0
+  },
+  {
+    "well": "F05",
+    "identity": 100.0
+  },
+  {
+    "well": "F06",
+    "identity": 100.0
+  },
+  {
+    "well": "F07",
+    "identity": 100.0
+  },
+  {
+    "well": "F08",
+    "identity": 100.0
+  },
+  {
+    "well": "F09",
+    "identity": 100.0
+  },
+  {
+    "well": "F10",
+    "identity": 100.0
+  },
+  {
+    "well": "F11",
+    "identity": 100.0
+  },
+  {
+    "well": "F12",
+    "identity": 100.0
+  },
+  {
+    "well": "G01",
+    "identity": 100.0
+  },
+  {
+    "well": "G02",
+    "identity": 100.0
+  },
+  {
+    "well": "G03",
+    "identity": 100.0
+  },
+  {
+    "well": "G04",
+    "identity": 100.0
+  },
+  {
+    "well": "G05",
+    "identity": 100.0
+  },
+  {
+    "well": "G06",
+    "identity": 100.0
+  },
+  {
+    "well": "G07",
+    "identity": 100.0
+  },
+  {
+    "well": "G08",
+    "identity": 100.0
+  },
+  {
+    "well": "G09",
+    "identity": 100.0
+  },
+  {
+    "well": "G10",
+    "identity": 100.0
+  },
+  {
+    "well": "G12",
+    "identity": 100.0
+  },
+  {
+    "well": "H01",
+    "identity": 100.0
+  },
+  {
+    "well": "H02",
+    "identity": 100.0
+  },
+  {
+    "well": "H03",
+    "identity": 100.0
+  },
+  {
+    "well": "H04",
+    "identity": 100.0
+  },
+  {
+    "well": "H05",
+    "identity": 100.0
+  },
+  {
+    "well": "H06",
+    "identity": 100.0
+  },
+  {
+    "well": "H07",
+    "identity": 100.0
+  },
+  {
+    "well": "H08",
+    "identity": 100.0
+  },
+  {
+    "well": "H09",
+    "identity": 100.0
+  },
+  {
+    "well": "H10",
+    "identity": 100.0
+  },
+  {
+    "well": "H11",
+    "identity": 100.0
+  },
+  {
+    "well": "H12",
+    "identity": 100.0
+  }
+]
