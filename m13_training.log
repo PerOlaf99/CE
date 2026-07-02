@@ -69,3 +69,5 @@ Class weights: {0: np.float64(0.997229916897507), 1: np.float64(0.99875156054931
 
 Training...
 Epoch 1/300
+900/900 - 26s - 29ms/step - accuracy: 0.3013 - loss: 1.3698 - val_accuracy: 0.2929 - val_loss: 1.3699 - learning_rate: 3.0000e-04
+Epoch 2/300
