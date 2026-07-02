@@ -1,181 +1,138 @@
 """
-Apply TraceTuner spectral separation to RSD data and evaluate basecalling accuracy.
-Uses edlib alignment to M13 reference for each well.
+Apply TraceTuner spectral separation to RSD data and evaluate
+basecalling accuracy vs M13 reference.
 """
 
-import sys
-import os
-import json
+import sys, os, json, struct
 import numpy as np
+import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, '/media/tv/78B0C7DE1FA7081C/electropherogram')
 from tracetuner_separation import trace_tuner_separate
 from m13_reference import M13Reference
+from extract_training_data import parse_rsd, parse_esd
 
-# Configuration
 RSD_DIR = '/media/tv/78B0C7DE1FA7081C/MiSeq_ABCC2_N1'
+ESD_DIR = '/media/tv/78B0C7DE1FA7081C/MiSeq_ABCC2_N1/CpG_Cp310_ESD'
 M13_REF_PATH = '/media/tv/78B0C7DE1FA7081C/electropherogram/m13_ref.fasta'
 PLATE_NAME = 'ABCC2_N1'
-MAX_WELLS = 5  # quick test
+MAX_WELLS = None  # None = all
+
+# Chemistry: Channel1-4 -> base
+# From RSD: Ch1=ET-R6G, Ch2=ET-R110, Ch3=ET-ROX, Ch4=ET-TAMRA
+# Mapping determined empirically from ESD peak channel assignments
+# Let's try all 24 permutations and pick the best
+CHEM_MAP = {0: 'A', 1: 'C', 2: 'G', 3: 'T'}
 
 
-def read_rsd_traces(rsd_path):
-    """Read raw 4-channel traces from an RSD file.
-    Returns (4, n_scans) numpy array."""
-    from struct import unpack
-    
-    with open(rsd_path, 'rb') as f:
-        data = f.read()
-    
-    # Find channel data markers (same as in gui.py/peak_detector.py)
-    ch_markers = [b'Scans1', b'Scans2', b'Scans3', b'Scans4']
-    traces = []
-    
-    for marker in ch_markers:
-        idx = data.find(marker)
-        if idx < 0:
-            traces.append(np.zeros(10000, dtype=np.int16))
-            continue
-        
-        # Find the data block after the marker
-        # Usually stored as uint16/int16 after the tag
-        header = data[idx:idx+200]
-        
-        # Try to find data length and offset
-        # Typical RSD format: tag + 4-byte offset + 4-byte length + data
-        data_offset = idx + 8  # skip tag + reserved
-        data_len = len(data) - data_offset
-        
-        # Try int16
-        try:
-            ch_data = np.frombuffer(data[data_offset:data_offset + data_len], 
-                                     dtype=np.int16)
-            # Trim trailing zeros
-            ch_data = ch_data[:np.where(ch_data != 0)[0][-1] + 1] if np.any(ch_data != 0) else ch_data
-            traces.append(ch_data.astype(np.float64))
-        except:
-            traces.append(np.zeros(10000, dtype=np.float64))
-    
-    # Pad to same length
-    max_len = max(len(t) for t in traces)
-    padded = np.zeros((4, max_len), dtype=np.float64)
-    for i, t in enumerate(traces):
-        padded[i, :len(t)] = t
-    
-    return padded
+def get_raw_traces(rsd_path):
+    df = parse_rsd(str(rsd_path))
+    ch = df[['Channel1', 'Channel2', 'Channel3', 'Channel4']].values.T
+    return ch.astype(np.float64)
 
 
-def read_rsd_traces_proper(rsd_path):
-    """Use the existing RSD reader from gui.py or peak_detector.py."""
-    sys.path.insert(0, str(Path(rsd_path).parent))
-    
-    try:
-        from rsd_reader import read_rsd
-        return read_rsd(rsd_path)
-    except ImportError:
-        pass
-    
-    try:
-        from peak_detector import read_rsd_file
-        data = read_rsd_file(rsd_path)
-        traces = np.zeros((4, len(data['scan_values'])), dtype=np.float64)
-        for i, ch_name in enumerate(['Channel1', 'Channel2', 'Channel3', 'Channel4']):
-            traces[i] = np.array(data[ch_name], dtype=np.float64)
-        return traces
-    except ImportError:
-        pass
-    
-    # Fall back to manual read
-    return read_rsd_traces(rsd_path)
-
-
-def max_channel_basecall(separated, peak_positions):
-    """Simple basecalling: at each peak position, pick channel with max signal.
-    Channel order: [Ch1, Ch2, Ch3, Ch4] mapped to bases based on chemistry."""
-    bases = []
-    for pos in peak_positions:
+def basecall_at_positions(separated, positions):
+    """Call base at each position using max channel."""
+    seq_chars = []
+    for pos in positions:
+        pos = int(pos)
         if pos < 0 or pos >= separated.shape[1]:
-            bases.append('N')
-            continue
-        vals = separated[:, int(pos)]
-        max_ch = np.argmax(vals)
-        # Standard ET chemistry mapping from RSD reader
-        mapping = {0: 'A', 1: 'C', 2: 'G', 3: 'T'}  # adjust as needed
-        bases.append(mapping.get(max_ch, 'N'))
-    return ''.join(bases)
+            seq_chars.append('N')
+        else:
+            vals = separated[:, pos]
+            ch = int(np.argmax(vals))
+            seq_chars.append(CHEM_MAP.get(ch, 'N'))
+    return ''.join(seq_chars)
+
+
+def evaluate(separated, esd, ref, well):
+    """Evaluate basecalling accuracy vs M13 at ESD peak positions."""
+    positions = esd.get('peak_positions')
+    if positions is None:
+        positions = esd.get('bases_positions')
+    seq_esd = esd.get('sequence', '')
+
+    if positions is None or not seq_esd:
+        return None
+
+    positions = positions.astype(int)
+    n = min(len(positions), len(seq_esd))
+    positions = positions[:n]
+    seq_esd = seq_esd[:n]
+
+    # Call bases at ESD peak positions
+    called = basecall_at_positions(separated, positions)
+
+    # Align to M13
+    result = ref.align(called)
+
+    if result is None:
+        return None
+
+    identity = result['matches'] / result['alignment_length'] * 100
+    return {
+        'well': well,
+        'identity': round(identity, 1),
+        'matches': result['matches'],
+        'aln_len': result['alignment_length'],
+        'called_len': len(called),
+        'esd_len': len(seq_esd),
+        'n_positions': n,
+    }
 
 
 def main():
     ref = M13Reference(M13_REF_PATH)
     rsd_dir = Path(RSD_DIR)
-    
-    # Find RSD files
+
     rsd_files = sorted(rsd_dir.glob('*.rsd'))
+    if MAX_WELLS:
+        rsd_files = rsd_files[:MAX_WELLS]
+
     print(f"Found {len(rsd_files)} RSD files")
-    
-    results = {}
-    for rsd_path in rsd_files[:MAX_WELLS]:
+
+    all_results = []
+    for rsd_path in rsd_files:
         well = rsd_path.stem
-        print(f"\nProcessing {well}...")
-        
-        try:
-            traces = read_rsd_traces_proper(str(rsd_path))
-            print(f"  Traces shape: {traces.shape}")
-        except Exception as e:
-            print(f"  Error reading: {e}")
+
+        # Find matching ESD
+        esd_path = Path(ESD_DIR) / f"{well}.esd"
+        if not esd_path.exists():
+            print(f"  {well}: no ESD file")
             continue
-        
+
+        try:
+            raw = get_raw_traces(rsd_path)
+            esd = parse_esd(str(esd_path))
+        except Exception as e:
+            print(f"  {well}: error reading: {e}")
+            continue
+
         # Apply TraceTuner separation
-        separated = trace_tuner_separate(traces)
-        
-        # Need peak positions for basecalling
-        # Use simple peak detection on sum of all channels
-        sum_trace = np.sum(separated, axis=0)
-        
-        # Simple peak detection
-        from scipy.signal import find_peaks
-        peaks, _ = find_peaks(sum_trace, 
-                               distance=8,  # ~12 scan spacing
-                               height=np.percentile(sum_trace[sum_trace > 0], 50))
-        
-        print(f"  Found {len(peaks)} peaks")
-        
-        # Basecall
-        called_seq = max_channel_basecall(separated, peaks)
-        
-        # Align to M13
-        result = ref.align(called_seq)
-        
+        separated = trace_tuner_separate(raw)
+
+        result = evaluate(separated, esd, ref, well)
         if result:
-            identity = result['matches'] / result['alignment_length'] * 100 if result['alignment_length'] > 0 else 0
-            results[well] = {
-                'identity': identity,
-                'matches': result['matches'],
-                'alignment_length': result['alignment_length'],
-                'called_length': len(called_seq),
-                'num_peaks': len(peaks)
-            }
-            print(f"  Identity vs M13: {identity:.1f}% "
-                  f"({result['matches']}/{result['alignment_length']})")
+            all_results.append(result)
+            print(f"  {well}: {result['identity']:.1f}% "
+                  f"({result['matches']}/{result['aln_len']}) "
+                  f"peaks={result['n_positions']}")
         else:
-            print(f"  No alignment found")
-    
-    # Summary
-    if results:
-        identities = [r['identity'] for r in results.values()]
+            print(f"  {well}: no alignment")
+
+    if all_results:
+        identities = [r['identity'] for r in all_results]
         print(f"\n{'='*50}")
-        print(f"Summary ({len(results)} wells):")
-        print(f"  Mean identity: {np.mean(identities):.1f}%")
-        print(f"  Min: {np.min(identities):.1f}%  Max: {np.max(identities):.1f}%")
-        
-        # Save results
-        out_path = f'tracetuner_results_{PLATE_NAME}.json'
-        with open(out_path, 'w') as f:
-            json.dump(results, f, indent=2)
-        print(f"  Results saved to {out_path}")
-    else:
-        print("\nNo results to report")
+        print(f"TraceTuner results ({len(all_results)} wells):")
+        print(f"  Mean: {np.mean(identities):.1f}%  "
+              f"Min: {np.min(identities):.1f}%  "
+              f"Max: {np.max(identities):.1f}%")
+
+        json_path = f'tracetuner_results_{PLATE_NAME}.json'
+        with open(json_path, 'w') as f:
+            json.dump(all_results, f, indent=2)
+        print(f"  Saved to {json_path}")
 
 
 if __name__ == '__main__':
