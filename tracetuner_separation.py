@@ -100,7 +100,7 @@ def make_multicomponent_iteration(chromatogram: np.ndarray):
         for j in range(NUM_COLORS):
             for k in range(NUM_COLORS):
                 if j == k:
-                    mcmatrix[j, k] += 1.0
+                    mcmatrix[j, k] = 1.0
                     continue
 
                 min_sig_ratio = float('inf')
