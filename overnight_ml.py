@@ -64,7 +64,7 @@ def loto_cv_rf(X, y, wells, n_estimators=500, max_depth=12):
         test_mask = wells == test_well
         train_mask = ~test_mask
         rf = RandomForestClassifier(
-            n_estimators=n_estimators, max_depth=max_depth,
+            n_estimators=int(n_estimators), max_depth=int(max_depth),
             class_weight='balanced', n_jobs=-1, random_state=42)
         rf.fit(X[train_mask].reshape(train_mask.sum(), -1), y[train_mask])
         pred = rf.predict(X[test_mask].reshape(test_mask.sum(), -1))
