@@ -1,0 +1,8 @@
+[22:23:10] Loading Cp312.npz...
+[22:23:10] Loaded: X (83805, 31, 4), y distribution: {0: 21604, 1: 20018, 2: 23314, 3: 18330, 4: 539}
+[22:23:10] Wells: 96 unique
+[22:23:10] After dropping N: X (83266, 31, 4), y distribution: {0: 21604, 1: 20018, 2: 23314, 3: 18330}
+[22:23:10] Preparing normalized datasets...
+[22:23:13] Normalization done in 2s
+[22:23:13] 
+=== Quick sanity: RF on A01 with z-score ===
