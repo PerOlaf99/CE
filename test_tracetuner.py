@@ -3,9 +3,8 @@ Apply TraceTuner spectral separation to RSD data and evaluate
 basecalling accuracy vs M13 reference.
 """
 
-import sys, os, json, struct
+import sys, os, json
 import numpy as np
-import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, '/media/tv/78B0C7DE1FA7081C/electropherogram')
@@ -13,16 +12,14 @@ from tracetuner_separation import trace_tuner_separate
 from m13_reference import M13Reference
 from extract_training_data import parse_rsd, parse_esd
 
-RSD_DIR = '/media/tv/78B0C7DE1FA7081C/MiSeq_ABCC2_N1'
-ESD_DIR = '/media/tv/78B0C7DE1FA7081C/MiSeq_ABCC2_N1/CpG_Cp310_ESD'
-M13_REF_PATH = '/media/tv/78B0C7DE1FA7081C/electropherogram/m13_ref.fasta'
-PLATE_NAME = 'ABCC2_N1'
-MAX_WELLS = None  # None = all
+BASE_DIR = '/media/tv/78B0C7DE1FA7081C/electropherogram'
+DATA_DIR = os.path.join(BASE_DIR, 'MB1000_M13_DT')
+ESD_SUBDIR = 'MB1000_M13_DT_Cp312_MD1'
+M13_REF_PATH = os.path.join(BASE_DIR, 'm13_ref.fasta')
+MAX_WELLS = 96
 
-# Chemistry: Channel1-4 -> base
-# From RSD: Ch1=ET-R6G, Ch2=ET-R110, Ch3=ET-ROX, Ch4=ET-TAMRA
-# Mapping determined empirically from ESD peak channel assignments
-# Let's try all 24 permutations and pick the best
+# Chemistry: Channel 0-3 -> base after TraceTuner separation
+# We'll try all 24 permutations and pick the best
 CHEM_MAP = {0: 'A', 1: 'C', 2: 'G', 3: 'T'}
 
 
@@ -32,22 +29,21 @@ def get_raw_traces(rsd_path):
     return ch.astype(np.float64)
 
 
-def basecall_at_positions(separated, positions):
-    """Call base at each position using max channel."""
+def basecall_at_positions(separated, positions, chem_map=None):
+    if chem_map is None:
+        chem_map = CHEM_MAP
     seq_chars = []
     for pos in positions:
         pos = int(pos)
         if pos < 0 or pos >= separated.shape[1]:
             seq_chars.append('N')
         else:
-            vals = separated[:, pos]
-            ch = int(np.argmax(vals))
-            seq_chars.append(CHEM_MAP.get(ch, 'N'))
+            ch = int(np.argmax(separated[:, pos]))
+            seq_chars.append(chem_map.get(ch, 'N'))
     return ''.join(seq_chars)
 
 
-def evaluate(separated, esd, ref, well):
-    """Evaluate basecalling accuracy vs M13 at ESD peak positions."""
+def evaluate_well(well, separated, esd, ref, chem_map=None):
     positions = esd.get('peak_positions')
     if positions is None:
         positions = esd.get('bases_positions')
@@ -58,15 +54,12 @@ def evaluate(separated, esd, ref, well):
 
     positions = positions.astype(int)
     n = min(len(positions), len(seq_esd))
+    if n == 0:
+        return None
     positions = positions[:n]
-    seq_esd = seq_esd[:n]
 
-    # Call bases at ESD peak positions
-    called = basecall_at_positions(separated, positions)
-
-    # Align to M13
+    called = basecall_at_positions(separated, positions, chem_map)
     result = ref.align(called)
-
     if result is None:
         return None
 
@@ -77,62 +70,85 @@ def evaluate(separated, esd, ref, well):
         'matches': result['matches'],
         'aln_len': result['alignment_length'],
         'called_len': len(called),
-        'esd_len': len(seq_esd),
-        'n_positions': n,
+        'esd_len': n,
     }
+
+
+def try_all_chemistries(raw, esd, ref):
+    """Try all 24 chemistry permutations and find the best."""
+    import itertools
+    bases = ['A', 'C', 'G', 'T']
+    best = None
+    best_map = None
+    for perm in itertools.permutations(range(4)):
+        chem_map = {i: bases[perm[i]] for i in range(4)}
+        separated = trace_tuner_separate(raw.copy())
+        result = evaluate_well('', separated, esd, ref, chem_map)
+        if result and (best is None or result['identity'] > best['identity']):
+            best = result
+            best_map = chem_map
+    return best, best_map
 
 
 def main():
     ref = M13Reference(M13_REF_PATH)
-    rsd_dir = Path(RSD_DIR)
+    rsd_dir = Path(DATA_DIR)
+    esd_dir = Path(DATA_DIR) / ESD_SUBDIR
 
     rsd_files = sorted(rsd_dir.glob('*.rsd'))
     if MAX_WELLS:
         rsd_files = rsd_files[:MAX_WELLS]
 
-    print(f"Found {len(rsd_files)} RSD files")
+    print(f"Found {len(rsd_files)} RSD files in {DATA_DIR}")
 
+    # First: determine chemistry mapping from first well
+    print("\nDetermining best chemistry mapping from first well...")
+    first_rsd = rsd_files[0]
+    try:
+        raw = get_raw_traces(first_rsd)
+        esd = parse_esd(str(esd_dir / f"{first_rsd.stem}.esd"))
+        best_result, best_map = try_all_chemistries(raw, esd, ref)
+        print(f"  Best chemistry: {best_map}")
+        print(f"  Identity: {best_result['identity']:.1f}%")
+    except Exception as e:
+        print(f"  Error: {e}")
+        best_map = CHEM_MAP
+
+    # Now evaluate all wells with best chemistry
+    print(f"\nEvaluating all {len(rsd_files)} wells with best chemistry...")
     all_results = []
     for rsd_path in rsd_files:
         well = rsd_path.stem
-
-        # Find matching ESD
-        esd_path = Path(ESD_DIR) / f"{well}.esd"
+        esd_path = esd_dir / f"{well}.esd"
         if not esd_path.exists():
-            print(f"  {well}: no ESD file")
             continue
 
         try:
             raw = get_raw_traces(rsd_path)
             esd = parse_esd(str(esd_path))
-        except Exception as e:
-            print(f"  {well}: error reading: {e}")
+        except Exception:
             continue
 
-        # Apply TraceTuner separation
         separated = trace_tuner_separate(raw)
-
-        result = evaluate(separated, esd, ref, well)
+        result = evaluate_well(well, separated, esd, ref, best_map)
         if result:
             all_results.append(result)
-            print(f"  {well}: {result['identity']:.1f}% "
-                  f"({result['matches']}/{result['aln_len']}) "
-                  f"peaks={result['n_positions']}")
-        else:
-            print(f"  {well}: no alignment")
 
     if all_results:
         identities = [r['identity'] for r in all_results]
-        print(f"\n{'='*50}")
-        print(f"TraceTuner results ({len(all_results)} wells):")
-        print(f"  Mean: {np.mean(identities):.1f}%  "
-              f"Min: {np.min(identities):.1f}%  "
-              f"Max: {np.max(identities):.1f}%")
+        print(f"\n{'='*60}")
+        print(f"TraceTuner results ({len(all_results)} wells, Cp312 peak positions):")
+        print(f"  Mean:  {np.mean(identities):.1f}%")
+        print(f"  Stdev: {np.std(identities):.1f}%")
+        print(f"  Min:   {np.min(identities):.1f}%")
+        print(f"  Max:   {np.max(identities):.1f}%")
 
-        json_path = f'tracetuner_results_{PLATE_NAME}.json'
+        json_path = os.path.join(BASE_DIR, 'tracetuner_results.json')
         with open(json_path, 'w') as f:
             json.dump(all_results, f, indent=2)
-        print(f"  Saved to {json_path}")
+        print(f"\nSaved to {json_path}")
+    else:
+        print("\nNo results.")
 
 
 if __name__ == '__main__':
