@@ -129,17 +129,19 @@ def load_m13_training_data(base_dir, data_subdir='MB1000_M13_DT',
                     esd = parse_esd(esd_path)
                 except:
                     continue
-                seq = esd.get('sequence', '')
-                positions = esd.get('peak_positions') or esd.get('bases_positions')
-                quality = esd.get('quality_scores')
-                if not seq or positions is None:
-                    continue
-                
-                n_bases = min(len(seq), len(positions))
-                if quality is not None:
-                    n_bases = min(n_bases, len(quality))
-                
-                for i in range(n_bases):
+            seq = esd.get('sequence', '')
+            positions = esd.get('peak_positions')
+            if positions is None:
+                positions = esd.get('bases_positions')
+            quality = esd.get('quality_scores')
+            if not seq or positions is None:
+                continue
+            
+            n_bases = min(len(seq), len(positions))
+            if quality is not None:
+                n_bases = min(n_bases, len(quality))
+            
+            for i in range(n_bases):
                     if quality is not None and quality[i] < quality_min:
                         continue
                     pos = int(positions[i])
