@@ -63,6 +63,7 @@ def evaluate_all_variants(wells):
             if r:
                 well_results.append(r)
         dt = time.time() - t0
+        print(f"    Time: {dt:.1f}s ({(dt/len(well_results)):.3f}s/well)")
         if well_results:
             ids = [r['identity'] for r in well_results]
             ns = [r['n_count'] for r in well_results]
