@@ -13,7 +13,7 @@ from tensorflow.keras import layers
 
 from extract_training_data import parse_rsd, parse_esd
 from m13_reference import align_to_reference, M13_REFERENCE
-from scipy.ndimage import savgol_filter
+from scipy.signal import savgol_filter
 
 DATA_DIR = 'MB1000_M13_DT'
 

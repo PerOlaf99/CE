@@ -1,0 +1,8 @@
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1783001635.462372 1692829 cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1783001637.216595 1692829 cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+Traceback (most recent call last):
+  File "/media/tv/78B0C7DE1FA7081C/electropherogram/train_m13_cnn.py", line 16, in <module>
+    from scipy.ndimage import savgol_filter
+ImportError: cannot import name 'savgol_filter' from 'scipy.ndimage' (/media/tv/78B0C7DE1FA7081C/electropherogram/env/lib/python3.12/site-packages/scipy/ndimage/__init__.py)
