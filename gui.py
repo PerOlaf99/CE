@@ -3410,12 +3410,13 @@ class ElectropherogramApp(QMainWindow):
         return feats
 
     def _train_is_only(self):
-        """Train using corrected IS peaks + Genotyping.xlsx ground truth or manual genotype."""
+        """Train using corrected IS peaks + Genotyping.xlsx ground truth.
+        Uses compact features (~30) to avoid overfitting."""
         import joblib, os
         import numpy as np
         import pandas as pd
         from run_is_genotyping import parse_rsd
-        from train_genotyping import extract_features_from_trace, SCRIPT_DIR, parse_genotyping_xlsx, normalize_plate_name
+        from train_genotyping import SCRIPT_DIR, parse_genotyping_xlsx, normalize_plate_name
 
         folder = self._current_folder
         if not folder:
@@ -3424,7 +3425,6 @@ class ElectropherogramApp(QMainWindow):
         folder_name = os.path.basename(folder)
         plate_name = normalize_plate_name(folder_name)
 
-        # Load genotypes from Genotyping.xlsx
         xlsx_path = os.path.join(SCRIPT_DIR, 'Genotyping.xlsx')
         if os.path.exists(xlsx_path):
             all_plates = parse_genotyping_xlsx(xlsx_path)
@@ -3435,7 +3435,6 @@ class ElectropherogramApp(QMainWindow):
         if plate_gt:
             print(f"Train IS: loaded {len(plate_gt)} genotypes from Genotyping.xlsx for {plate_name}")
 
-        # Gather wells with corrected IS peaks from well_data
         X_list, y_list = [], []
         feature_cols = None
 
@@ -3447,7 +3446,6 @@ class ElectropherogramApp(QMainWindow):
             pchs = wd.get('peak_channels', [])
             if peaks is None or len(peaks) < 2:
                 continue
-            # Get Ch3 peaks
             ch3_scans = []
             for i, s in enumerate(peaks):
                 ch = pchs[i] if i < len(pchs) else ''
@@ -3466,12 +3464,11 @@ class ElectropherogramApp(QMainWindow):
 
             ch3 = df['Channel3'].values.astype(float)
             ispk = [(s, float(ch3[s])) for s in ch3_scans if s < len(ch3)]
-            feats = extract_features_from_trace(df, is_peaks=ispk)
+            feats = self._extract_simple_features(df, is_peaks=ispk)
             if feature_cols is None:
-                feature_cols = sorted([k for k in feats.keys() if k not in ('n_scans',)])
+                feature_cols = sorted(feats.keys())
             row = [feats.get(f, 0.0) for f in feature_cols]
 
-            # Genotype: well_data → Genotyping.xlsx → default het (4)
             gt = self._well_data.get(well, {}).get('genotype')
             if gt is None:
                 gt = plate_gt.get(well)
@@ -3513,20 +3510,19 @@ class ElectropherogramApp(QMainWindow):
                         continue
                     ch3 = df['Channel3'].values.astype(float)
                     ispk = [(s, float(ch3[s])) for s in ch3_scans if s < len(ch3)]
-                    feats = extract_features_from_trace(df, is_peaks=ispk)
+                    feats = self._extract_simple_features(df, is_peaks=ispk)
                     row = [feats.get(f, 0.0) for f in feature_cols]
                     X_list.append(row)
                     y_list.append(4)
             else:
-                QMessageBox.warning(self, "Train IS",
-                                    "Not enough labeled wells. Train cancelled.")
+                QMessageBox.warning(self, "Train IS", "Not enough labeled wells. Train cancelled.")
                 return
 
         X = np.array(X_list)
         y = np.array(y_list)
 
         from sklearn.ensemble import RandomForestClassifier
-        clf = RandomForestClassifier(n_estimators=300, max_depth=12, min_samples_leaf=3,
+        clf = RandomForestClassifier(n_estimators=200, max_depth=8, min_samples_leaf=5,
                                      class_weight='balanced', random_state=42, n_jobs=-1)
         clf.fit(X, y)
 
@@ -3535,8 +3531,10 @@ class ElectropherogramApp(QMainWindow):
         pd.DataFrame({'feature': feature_cols}).to_csv(
             model_path.replace('.pkl', '_features.csv'), index=False)
 
+        y_pred = clf.predict(X)
+        correct = (y_pred == y).sum()
         QMessageBox.information(self, "Train IS",
-                                f"Trained on {len(X)} wells ({len(set(y))} classes).\n"
+                                f"Trained on {len(X)} wells, {correct}/{len(X)} correct.\n"
                                 f"Model saved to genotyping_model.pkl")
 
     def _export_is_peaks_csv(self):
