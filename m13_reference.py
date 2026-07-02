@@ -27,6 +27,9 @@ def save_reference(dir_path):
     print(f"Saved M13 reference ({len(M13_REFERENCE)} bp) to {path}")
 
 
+import re
+
+
 def align_to_reference(query, ref=None, gap_open=-10, gap_extend=-1, match=2, mismatch=-3):
     """Smith-Waterman local alignment of query to M13 reference using edlib.
     
@@ -35,60 +38,50 @@ def align_to_reference(query, ref=None, gap_open=-10, gap_extend=-1, match=2, mi
     if ref is None:
         ref = M13_REFERENCE
     
-    # Use edlib for fast alignment
-    # edlib uses NW/SW: task='path' gives CIGAR
-    # Set mode='NW' for global, 'HW' for infix, 'SH' for prefix/suffix
     query_clean = ''.join(c for c in query if c in 'ACGT')
+    if len(query_clean) < 10:
+        return {'query_start': 0, 'ref_start': 0, 'query_end': 0, 'ref_end': 0,
+                'aligned_length': 0, 'matches': 0, 'identity': 0.0,
+                'query_aligned': '', 'ref_aligned': '', 'score': 0}
     
     result = edlib.align(query_clean, ref, mode='HW', task='path')
     
-    if result['editDistance'] is None or result['locations'] is None:
-        return {
-            'query_start': 0, 'ref_start': 0,
-            'query_end': 0, 'ref_end': 0,
-            'aligned_length': 0, 'matches': 0,
-            'identity': 0.0,
-            'query_aligned': '', 'ref_aligned': '',
-            'score': 0,
-        }
+    if result['editDistance'] is None or result['cigar'] is None:
+        return {'query_start': 0, 'ref_start': 0, 'query_end': 0, 'ref_end': 0,
+                'aligned_length': 0, 'matches': 0, 'identity': 0.0,
+                'query_aligned': '', 'ref_aligned': '', 'score': 0}
     
-    # Get alignment details from CIGAR-like format
     locations = result['locations'][0]
     ref_start = locations[0]
     ref_end = locations[1]
-    
-    # Build aligned sequences from edlib result
-    # edlib gives us the CIGAR string - decode it
     cigar = result['cigar']
+    
+    # Parse CIGAR: alternating numbers and operations
+    parts = re.findall(r'\d+|[MIDNSHP=X]', cigar)
     
     q_aligned_parts = []
     r_aligned_parts = []
     q_pos = 0
     r_pos = ref_start
     
-    # Parse CIGAR: each entry is (length, type) where type is
-    # 0=match, 1=insertion, 2=deletion
-    cig_types = []
-    cig_lengths = []
-    
-    i = 0
-    while i < len(cigar):
-        # Each element is a tuple (length, type)
-        length, typ = cigar[i]
-        if typ == 0:  # match/mismatch
-            q_aligned_parts.append(query_clean[q_pos:q_pos + length])
-            r_aligned_parts.append(ref[r_pos:r_pos + length])
+    for k in range(0, len(parts), 2):
+        length = int(parts[k])
+        op = parts[k + 1]
+        if op in ('=', 'M', 'X'):
+            q_seg = query_clean[q_pos:q_pos + length]
+            r_seg = ref[r_pos:r_pos + length]
+            q_aligned_parts.append(q_seg)
+            r_aligned_parts.append(r_seg)
             q_pos += length
             r_pos += length
-        elif typ == 1:  # insertion (gap in ref)
+        elif op == 'I':
             q_aligned_parts.append(query_clean[q_pos:q_pos + length])
             r_aligned_parts.append('-' * length)
             q_pos += length
-        else:  # deletion (gap in query)
+        elif op == 'D':
             q_aligned_parts.append('-' * length)
             r_aligned_parts.append(ref[r_pos:r_pos + length])
             r_pos += length
-        i += 1
     
     q_aligned = ''.join(q_aligned_parts)
     r_aligned = ''.join(r_aligned_parts)
