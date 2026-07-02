@@ -179,74 +179,75 @@ def main():
 
     # Phase 3: 5 rounds of active retraining
     print("\n" + "="*60)
-    print("PHASE 3: 5 ROUNDS ACTIVE RETRAINING")
+    print("PHASE 3: 5 ROUNDS ACTIVE RETRAINING (ensemble → M13 alignment → retrain)")
     print("="*60)
 
     current_models = trained_models.copy()
     for iteration in range(5):
         print(f"\n--- Active retraining iteration {iteration + 1}/5 ---")
 
-        # Generate ensemble pseudo-labels on train wells
+        # Generate ensemble predictions → align to M13 → extract corrected labels
         new_X, new_y = [], []
+        n_corrected, n_kept = 0, 0
+        base_map = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
         for well in train_wells:
             df = load_well(well, data_dir)
             if df is None:
                 continue
+            ch = df[CH_NAMES].values
+            n_scans = len(ch)
+            window = 15
+
+            # Get ensemble sequence via per-scan decoding
             positions, classes, confs = generate_pseudo_labels(current_models, df)
             if len(positions) == 0:
                 continue
-            bases, _ = decode_scan_calls(positions, classes, confs,
-                                        min_confidence=0.65)
+            bases, decoded_positions = decode_scan_calls(
+                positions, classes, confs, min_confidence=0.65)
             seq = ''.join(bases)
             if len(seq) < 50:
                 continue
+
+            # Align to M13 to find ground-truth labels at each base position
             aln = align_to_reference(seq)
             if aln['identity'] < 0.5:
                 continue
 
-            # For high-confidence positions, use M13 reference as label
             q_aln = aln['query_aligned']
             r_aln = aln['ref_aligned']
-            esd_pos = 0
+
+            # Walk alignment: for each aligned base position, extract the
+            # corresponding scan window and use M13 ref as label
+            esd_idx = 0
             for qb, rb in zip(q_aln, r_aln):
                 if qb == '-' or rb == '-':
                     continue
-                if esd_pos >= len(bases):
-                    break
-                if bases[esd_pos] == rb:
-                    # Correct prediction — use as training example
-                    # Find the scan position (approximate from decoded positions)
-                    pass
-                esd_pos += 1
-
-            # Simpler approach: scan every position, use M13 alignment as label
-            ch = df[CH_NAMES].values
-            n = len(ch)
-            for p in range(15, n - 15):
-                win = ch[p - 15:p + 16]
-                # Predict
-                X_single = normalize(win[np.newaxis, ...])
-                preds = [m.predict(X_single, verbose=0)[0] for m in current_models]
-                avg_pred = np.mean(preds, axis=0)
-                cls = avg_pred.argmax()
-                conf = avg_pred.max()
-                if cls >= 4 or conf < 0.8:
+                # This base (at esd_idx in decoded sequence) aligns to M13 base rb
+                ref_base = rb  # ground truth from M13
+                if ref_base not in base_map:
+                    esd_idx += 1
                     continue
+                scan_pos = int(decoded_positions[esd_idx]) if esd_idx < len(decoded_positions) else 0
+                if scan_pos < window or scan_pos >= n_scans - window:
+                    esd_idx += 1
+                    continue
+                win = ch[scan_pos - window:scan_pos + window + 1]
                 new_X.append(win)
-                new_y.append(cls)
+                new_y.append(base_map[ref_base])
+                if qb != ref_base:
+                    n_corrected += 1  # model was wrong, corrected by M13
+                n_kept += 1
+                esd_idx += 1
 
-        if len(new_X) < 100:
-            print(f"  Only {len(new_X)} new examples, skipping")
+        print(f"  Extracted {n_kept} labeled examples ({n_corrected} corrected by M13 ref)")
+
+        if n_kept < 100:
+            print(f"  Too few examples, skipping")
             continue
 
         X_new = np.array(new_X, dtype=np.float32)
         y_new = np.array(new_y, dtype=np.uint8)
-        print(f"  Generated {len(X_new)} pseudo-labeled examples")
-
-        # Retrain each model with combined data
-        X_combined = np.concatenate([X_train, X_new])
-        y_combined = np.concatenate([y_train, y_new])
-        print(f"  Combined: {len(X_combined)} examples")
+        print(f"  Class distribution: {np.bincount(y_new, minlength=5)}")
 
         # Shuffle
         shuffle_idx = np.random.permutation(len(X_combined))
