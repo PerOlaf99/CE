@@ -1,0 +1,68 @@
+{
+  "Cp312": {
+    "method": "ESD Cimarron 3.12",
+    "n_wells": 96,
+    "mean_identity": 0.8943022696259764,
+    "median_identity": 0.8954293312226285,
+    "std_identity": 0.012277276955133561,
+    "min_identity": 0.8542336548767417,
+    "max_identity": 0.9252336448598131,
+    "mean_n_count": 5.614583333333333,
+    "mean_seq_len": 872.96875
+  },
+  "Cp312_a": {
+    "method": "ESD Cimarron 3.12 Aligned",
+    "n_wells": 96,
+    "mean_identity": 0.8943022696259764,
+    "median_identity": 0.8954293312226285,
+    "std_identity": 0.012277276955133561,
+    "min_identity": 0.8542336548767417,
+    "max_identity": 0.9252336448598131,
+    "mean_n_count": 5.614583333333333,
+    "mean_seq_len": 872.96875
+  },
+  "Cp312_es": {
+    "method": "ESD Cimarron 3.12 Even Spacing",
+    "n_wells": 96,
+    "mean_identity": 0.8949668689299504,
+    "median_identity": 0.8962160427582433,
+    "std_identity": 0.012264396383967787,
+    "min_identity": 0.8551502145922747,
+    "max_identity": 0.9263157894736842,
+    "mean_n_count": 5.5625,
+    "mean_seq_len": 872.1354166666666
+  },
+  "Cp1_530": {
+    "method": "ESD Cimarron 1.53",
+    "n_wells": 96,
+    "mean_identity": 0.8805154853477223,
+    "median_identity": 0.8804100227790432,
+    "std_identity": 0.01011217766120424,
+    "min_identity": 0.8585635359116022,
+    "max_identity": 0.9111374407582938,
+    "mean_n_count": 9.3125,
+    "mean_seq_len": 867.7708333333334
+  },
+  "Cp1_530_sl_ph": {
+    "method": "ESD Cimarron 1.53 Slim Phredify",
+    "n_wells": 96,
+    "mean_identity": 0.880623348033008,
+    "median_identity": 0.8804530384470188,
+    "std_identity": 0.010091454836570167,
+    "min_identity": 0.8585635359116022,
+    "max_identity": 0.9111374407582938,
+    "mean_n_count": 9.302083333333334,
+    "mean_seq_len": 867.59375
+  },
+  "MD": {
+    "method": "ESD Molecular Dynamics",
+    "n_wells": 96,
+    "mean_identity": 0.9104227781693215,
+    "median_identity": 0.910584579093368,
+    "std_identity": 0.024034121326736383,
+    "min_identity": 0.7977296181630547,
+    "max_identity": 0.949748743718593,
+    "mean_n_count": 6.760416666666667,
+    "mean_seq_len": 817.28125
+  }
+}
