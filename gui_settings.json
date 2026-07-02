@@ -13,10 +13,10 @@
   "is_n": 4,
   "detection": 0,
   "channels": {
-    "Channel1": false,
+    "Channel1": true,
     "Channel2": true,
     "Channel3": true,
-    "Channel4": false,
+    "Channel4": true,
     "Current": false
   },
   "window_x": 66,
