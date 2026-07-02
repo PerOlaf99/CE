@@ -1,0 +1,26 @@
+{
+  "height": 200,
+  "prominence": 50,
+  "distance": 5,
+  "min_width": 2,
+  "stutter": false,
+  "stutter_window": 5,
+  "baseline": 3,
+  "baseline_param": 5,
+  "scan_limit": true,
+  "scan_start": 2200,
+  "scan_end": 3200,
+  "is_n": 4,
+  "detection": 0,
+  "channels": {
+    "Channel1": false,
+    "Channel2": false,
+    "Channel3": true,
+    "Channel4": false,
+    "Current": false
+  },
+  "window_x": 0,
+  "window_y": 0,
+  "window_w": 1848,
+  "window_h": 1015
+}

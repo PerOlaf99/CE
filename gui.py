@@ -2,6 +2,7 @@ import sys
 import os
 import csv
 import struct
+import glob
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,11 @@ from matplotlib.ticker import MaxNLocator
 
 from peak_detector import PeakDetector, PEAK_CHANNEL_NAMES
 from cnn_peak_detector import CnnPeakDetector
-from basecaller import basecall, basecall_ml, CHEMISTRY_MAP
+from basecaller import (
+    basecall, basecall_ml, basecall_cimarron,
+    export_bases_csv, export_bases_fasta, export_bases_summary,
+    CHEMISTRY_MAP, esd_caller_display_name,
+)
 
 
 CLICK_TOLERANCE = 10
@@ -146,9 +151,32 @@ class MatrixEditorDialog(QDialog):
 class SequenceDialog(QDialog):
     def __init__(self, well_results, parent=None):
         super().__init__(parent)
+        self.well_results = well_results
         self.setWindowTitle("Base Calling Results")
-        self.resize(700, 500)
+        self.resize(800, 600)
         layout = QVBoxLayout(self)
+
+        # Summary bar
+        total_bases = sum(r['total_calls'] for r in well_results.values())
+        total_n = sum(r['n_count'] for r in well_results.values())
+        avg_q = int(np.mean([r['avg_quality'] for r in well_results.values()]))
+        summary = QLabel(
+            f"Wells: {len(well_results)}  |  "
+            f"Total bases: {total_bases}  |  "
+            f"N's: {total_n} ({total_n/max(total_bases,1)*100:.1f}%)  |  "
+            f"Avg quality: {avg_q}"
+        )
+        summary.setStyleSheet("font-weight: bold; padding: 4px;")
+        layout.addWidget(summary)
+
+        # Auto-threshold info if ML
+        first = next(iter(well_results.values()))
+        if first.get('auto_threshold'):
+            thresh = first['auto_threshold']
+            info = QLabel(f"ML auto-threshold: p ≥ {thresh:.2f}  "
+                          f"(target 98% accuracy)")
+            info.setStyleSheet("color: #666; font-size: 11px; padding: 2px 4px;")
+            layout.addWidget(info)
 
         tab_widget = QTabWidget()
         for well, result in well_results.items():
@@ -175,26 +203,41 @@ class SequenceDialog(QDialog):
         layout.addWidget(tab_widget)
 
         btn_row = QHBoxLayout()
-        btn_save = QPushButton("Save FASTA")
-        btn_save.clicked.connect(lambda: self._save_fasta(well_results))
-        btn_row.addWidget(btn_save)
+        btn_fasta = QPushButton("Save FASTA")
+        btn_fasta.clicked.connect(lambda: self._save_fasta())
+        btn_row.addWidget(btn_fasta)
+        btn_csv = QPushButton("Save CSV")
+        btn_csv.clicked.connect(lambda: self._save_csv())
+        btn_row.addWidget(btn_csv)
+        btn_summary = QPushButton("Save Summary")
+        btn_summary.clicked.connect(lambda: self._save_summary())
+        btn_row.addWidget(btn_summary)
+        btn_row.addStretch()
         btn_close = QPushButton("Close")
         btn_close.clicked.connect(self.accept)
         btn_row.addWidget(btn_close)
         layout.addLayout(btn_row)
 
-    def _save_fasta(self, well_results):
+    def _save_fasta(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Save FASTA", "", "FASTA (*.seq *.fasta);;All Files (*)"
         )
-        if not path:
-            return
-        with open(path, "w") as f:
-            for well, result in well_results.items():
-                f.write(f">{well}\n")
-                seq = result["sequence"]
-                for i in range(0, len(seq), 80):
-                    f.write(seq[i:i+80] + "\n")
+        if path:
+            export_bases_fasta(self.well_results, path)
+
+    def _save_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save CSV", "", "CSV (*.csv);;All Files (*)"
+        )
+        if path:
+            export_bases_csv(self.well_results, path)
+
+    def _save_summary(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Summary", "", "CSV (*.csv);;All Files (*)"
+        )
+        if path:
+            export_bases_summary(self.well_results, path)
 
 
 class ElectropherogramApp(QMainWindow):
@@ -216,11 +259,23 @@ class ElectropherogramApp(QMainWindow):
         self._page_start = 0
         self._current_page_wells = []
         self._active_well = None
+        self.auto_scale_x = True
+        self.auto_scale_y = True
+        self._saved_xlim = None
+        self._saved_ylims = []
+        self._saved_ylims2 = []
+        self._esd_data = {}  # well -> {caller_name: esd_dict}
+        self._esd_callers = []  # list of (caller_name, subdir_path)
+        self._esd_caller_combo = None
         self._undo_manager = UndoManager()
         self._spectral_matrix = DEFAULT_SPECTRAL_MATRIX.copy()
+        self._is_ref_scans = []
+        self._is_ref_tolerance = 30
 
         self.training_data = []
         self._figure_labels = []
+        self._current_folder = None
+        self._file_header = {}
         self._original_all_data = None
         self._is_channel = None
         self._is_peak_num = None
@@ -234,7 +289,147 @@ class ElectropherogramApp(QMainWindow):
             'Current': {'active': '#555555', 'inactive': '#e0e0e0'},
         }
 
+        self._config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gui_settings.json')
+        self._load_settings()
+
+        # Restore window geometry
+        s = self._settings
+        self.resize(s.get('window_w', 1400), s.get('window_h', 850))
+        self.move(s.get('window_x', 100), s.get('window_y', 100))
+
         self.init_ui()
+        self._apply_settings()
+
+    def closeEvent(self, event):
+        self._save_settings()
+        if self._current_folder:
+            self._save_peak_data(self._current_folder)
+        super().closeEvent(event)
+
+    def _load_settings(self):
+        import json
+        defaults = {
+            'height': 100, 'prominence': 50, 'distance': 5, 'min_width': 1,
+            'stutter': False, 'stutter_window': 5,
+            'baseline': 0, 'baseline_param': 500,
+            'scan_limit': False, 'scan_start': 0, 'scan_end': 50000,
+            'is_n': 4,
+            'detection': 0,
+            'channels': {'Channel2': True},
+            'window_x': 100, 'window_y': 100, 'window_w': 1400, 'window_h': 850,
+        }
+        try:
+            with open(self._config_path) as f:
+                loaded = json.load(f)
+            for k, v in defaults.items():
+                if k not in loaded:
+                    loaded[k] = v
+            self._settings = loaded
+        except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+            self._settings = defaults
+
+    def _save_settings(self):
+        import json
+        s = self._settings
+        s['height'] = self.height_spin.value()
+        s['prominence'] = self.prominence_spin.value()
+        s['distance'] = self.distance_spin.value()
+        s['min_width'] = self.min_width_spin.value()
+        s['stutter'] = self.stutter_cb.isChecked()
+        s['stutter_window'] = self.stutter_spin.value()
+        s['baseline'] = self.baseline_combo.currentIndex()
+        s['baseline_param'] = self.bl_spin.value()
+        s['scan_limit'] = self.range_cb.isChecked()
+        s['scan_start'] = self.start_spin.value()
+        s['scan_end'] = self.end_spin.value()
+        s['is_n'] = self.is_n_spin.value()
+        s['detection'] = self.detection_combo.currentIndex()
+        s['channels'] = {ch: btn.isChecked() for ch, btn in self.channel_buttons.items()}
+        geo = self.geometry()
+        s['window_x'] = geo.x()
+        s['window_y'] = geo.y()
+        s['window_w'] = geo.width()
+        s['window_h'] = geo.height()
+        try:
+            with open(self._config_path, 'w') as f:
+                json.dump(s, f, indent=2)
+        except (OSError, PermissionError):
+            pass
+
+    def _peak_data_path(self, folder):
+        base = os.path.basename(folder)
+        return os.path.join(os.path.dirname(folder), f'.peak_data_{base}.json')
+
+    def _save_peak_data(self, folder):
+        import json
+        data = {
+            'manual_peaks': {w: [[int(s), ch] for s, ch in peaks]
+                             for w, peaks in self._manual_peaks.items()},
+            'deleted_peaks': {w: [int(x) for x in del_set]
+                              for w, del_set in self._deleted_peaks.items()},
+        }
+        for w in self._well_data:
+            if w not in data:
+                data[w] = {}
+            if 'peaks' in self._well_data[w]:
+                p = self._well_data[w]['peaks']
+                data[w]['peaks'] = [int(x) for x in p] if p is not None else None
+            if 'peak_channels' in self._well_data[w]:
+                data[w]['peak_channels'] = list(self._well_data[w]['peak_channels'])
+        try:
+            with open(self._peak_data_path(folder), 'w') as f:
+                json.dump(data, f, indent=2)
+        except (OSError, PermissionError):
+            pass
+
+    def _load_peak_data(self, folder):
+        import json
+        path = self._peak_data_path(folder)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, FileNotFoundError, json.JSONDecodeError):
+            return
+        self._manual_peaks = {}
+        for w, lst in data.get('manual_peaks', {}).items():
+            self._manual_peaks[w] = [(int(s), int(ch)) for s, ch in lst]
+        self._deleted_peaks = {}
+        for w, lst in data.get('deleted_peaks', {}).items():
+            self._deleted_peaks[w] = set(int(x) for x in lst)
+        for w in self._well_data:
+            if w not in data:
+                continue
+            if 'peaks' in data[w] and data[w]['peaks'] is not None:
+                self._well_data[w]['peaks'] = np.array(data[w]['peaks'], dtype=np.float64)
+            if 'peak_channels' in data[w]:
+                self._well_data[w]['peak_channels'] = list(data[w]['peak_channels'])
+        self.status_label.setText(f"Restored saved peak data ({len(self._manual_peaks)} wells with edits)")
+
+    def _apply_settings(self):
+        s = self._settings
+        self.height_spin.setValue(s.get('height', 100))
+        self.prominence_spin.setValue(s.get('prominence', 50))
+        self.distance_spin.setValue(s.get('distance', 5))
+        self.min_width_spin.setValue(s.get('min_width', 1))
+        self.stutter_cb.setChecked(s.get('stutter', False))
+        self.stutter_spin.setValue(s.get('stutter_window', 5))
+        self.baseline_combo.setCurrentIndex(s.get('baseline', 0))
+        self.bl_spin.setValue(s.get('baseline_param', 500))
+        self.is_n_spin.setValue(s.get('is_n', 4))
+        self.detection_combo.setCurrentIndex(s.get('detection', 0))
+
+        scan_limit = s.get('scan_limit', False)
+        self.range_cb.setChecked(scan_limit)
+        self.start_spin.setValue(s.get('scan_start', 0))
+        self.start_spin.setEnabled(scan_limit)
+        self.end_spin.setValue(s.get('scan_end', 50000))
+        self.end_spin.setEnabled(scan_limit)
+
+        ch_settings = s.get('channels', {'Channel2': True})
+        for ch, checked in ch_settings.items():
+            if ch in self.channel_buttons:
+                self.channel_buttons[ch].setChecked(checked)
+                self._update_channel_style(ch)
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -378,18 +573,22 @@ class ElectropherogramApp(QMainWindow):
 
         # Export / ML row
         ml_layout = QHBoxLayout()
-        export_btn = QPushButton("Export ML Data")
-        export_btn.setToolTip("Export labeled peak data as CSV for ML training")
-        export_btn.clicked.connect(self.export_training_data)
-        ml_layout.addWidget(export_btn)
-        train_btn = QPushButton("Train RF")
-        train_btn.setToolTip("Train a Random Forest classifier using exported peak labels")
-        train_btn.clicked.connect(self.train_random_forest)
-        ml_layout.addWidget(train_btn)
+        train_cnn_btn = QPushButton("Train CNN")
+        train_cnn_btn.setToolTip("Retrain the ML base caller CNN model using extracted training data")
+        train_cnn_btn.clicked.connect(self._train_cnn_model)
+        ml_layout.addWidget(train_cnn_btn)
         export_sel_btn = QPushButton("Export Selected")
         export_sel_btn.setToolTip("Export peaks and areas for selected wells as CSV")
         export_sel_btn.clicked.connect(self.export_selected_wells)
         ml_layout.addWidget(export_sel_btn)
+        export_btn = QPushButton("Export ML Data")
+        export_btn.setToolTip("Export labeled peak data as CSV for ML training")
+        export_btn.clicked.connect(self.export_training_data)
+        ml_layout.addWidget(export_btn)
+        pred_btn = QPushButton("Predict Genotypes")
+        pred_btn.setToolTip("Predict genotyping calls (0/1/2/4) using trained ML model")
+        pred_btn.clicked.connect(self.predict_genotypes)
+        ml_layout.addWidget(pred_btn)
         layout.addLayout(ml_layout)
 
         # Stutter controls
@@ -440,7 +639,60 @@ class ElectropherogramApp(QMainWindow):
         self.min_width_spin.setValue(1)
         self.min_width_spin.valueChanged.connect(self._mark_dirty_and_update)
         params_layout.addWidget(self.min_width_spin)
+        clear_peaks_btn = QPushButton("Clear Peaks")
+        clear_peaks_btn.setToolTip("Remove all detected peaks in current well")
+        clear_peaks_btn.clicked.connect(self._clear_all_peaks)
+        params_layout.addWidget(clear_peaks_btn)
         layout.addLayout(params_layout)
+
+        # IS reference row
+        is_ref_layout = QHBoxLayout()
+        self.save_is_btn = QPushButton("Save IS Ref.")
+        self.save_is_btn.setToolTip("Save manually-added peaks in Ch3 as IS reference positions")
+        self.save_is_btn.clicked.connect(self._save_is_reference)
+        is_ref_layout.addWidget(self.save_is_btn)
+        self.find_is_btn = QPushButton("Find IS Peaks")
+        self.find_is_btn.setToolTip("Find IS peaks in all wells using saved reference")
+        self.find_is_btn.clicked.connect(self._find_is_peaks)
+        is_ref_layout.addWidget(self.find_is_btn)
+        is_ref_layout.addWidget(QLabel("N:"))
+        self.is_n_spin = QSpinBox()
+        self.is_n_spin.setToolTip("Number of IS peaks to find per well")
+        self.is_n_spin.setRange(1, 20)
+        self.is_n_spin.setValue(4)
+        is_ref_layout.addWidget(self.is_n_spin)
+        self.save_is_model_btn = QPushButton("Save Model")
+        self.save_is_model_btn.setToolTip("Save trained IS model to file")
+        self.save_is_model_btn.clicked.connect(self._save_is_model)
+        is_ref_layout.addWidget(self.save_is_model_btn)
+        self.batch_is_btn = QPushButton("Batch IS")
+        self.batch_is_btn.setToolTip("Run IS detection on all matching fragment folders in OY/")
+        self.batch_is_btn.clicked.connect(self._batch_is_detect)
+        is_ref_layout.addWidget(self.batch_is_btn)
+        self.load_is_btn = QPushButton("Load IS CSV")
+        self.load_is_btn.setToolTip("Load saved IS peaks CSV and display on plot")
+        self.load_is_btn.clicked.connect(self._load_is_peaks)
+        is_ref_layout.addWidget(self.load_is_btn)
+        self.export_is_btn = QPushButton("Export IS CSV")
+        self.export_is_btn.setToolTip("Export all wells' IS peaks to CSV for ML training")
+        self.export_is_btn.clicked.connect(self._export_is_peaks_csv)
+        is_ref_layout.addWidget(self.export_is_btn)
+        self.is_ref_label = QLabel("ref: none")
+        self.is_ref_label.setStyleSheet("color: #888; font-size: 10px;")
+        is_ref_layout.addWidget(self.is_ref_label)
+        layout.addLayout(is_ref_layout)
+
+        # Training buttons row
+        train_layout = QHBoxLayout()
+        self.train_geno_btn = QPushButton("Train Genotyping")
+        self.train_geno_btn.setToolTip("Train genotyping model using Genotyping.xlsx ground truth")
+        self.train_geno_btn.clicked.connect(self._train_genotyping)
+        train_layout.addWidget(self.train_geno_btn)
+        self.train_is_btn = QPushButton("Train IS")
+        self.train_is_btn.setToolTip("Train using IS peaks CSV (corrected peaks, no Genotyping.xlsx needed)")
+        self.train_is_btn.clicked.connect(self._train_is_only)
+        train_layout.addWidget(self.train_is_btn)
+        layout.addLayout(train_layout)
 
         # Baseline controls
         bl_layout = QHBoxLayout()
@@ -479,7 +731,7 @@ class ElectropherogramApp(QMainWindow):
         range_layout.addWidget(QLabel("Start:"))
         self.start_spin = QSpinBox()
         self.start_spin.setToolTip("Start scan number for range-limited detection")
-        self.start_spin.setRange(0, 100000)
+        self.start_spin.setRange(0, 500000)
         self.start_spin.setValue(0)
         self.start_spin.setEnabled(False)
         self.start_spin.valueChanged.connect(self._mark_dirty_and_update)
@@ -487,7 +739,7 @@ class ElectropherogramApp(QMainWindow):
         range_layout.addWidget(QLabel("End:"))
         self.end_spin = QSpinBox()
         self.end_spin.setToolTip("End scan number for range-limited detection")
-        self.end_spin.setRange(0, 100000)
+        self.end_spin.setRange(0, 500000)
         self.end_spin.setValue(50000)
         self.end_spin.setEnabled(False)
         self.end_spin.valueChanged.connect(self._mark_dirty_and_update)
@@ -496,6 +748,24 @@ class ElectropherogramApp(QMainWindow):
 
         self.status_label = QLabel("No data loaded")
         layout.addWidget(self.status_label)
+        self.folder_label = QLabel("")
+        self.folder_label.setStyleSheet("font-size: 10px; color: #888;")
+        layout.addWidget(self.folder_label)
+
+        # File header info
+        self.header_group = QGroupBox("File Header")
+        self.header_group.setVisible(False)
+        header_layout = QVBoxLayout(self.header_group)
+        self.header_table = QTableWidget()
+        self.header_table.setColumnCount(2)
+        self.header_table.setHorizontalHeaderLabels(['Field', 'Value'])
+        self.header_table.horizontalHeader().setStretchLastSection(True)
+        self.header_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.header_table.setSelectionMode(QTableWidget.NoSelection)
+        self.header_table.setMaximumHeight(200)
+        self.header_table.verticalHeader().setVisible(False)
+        header_layout.addWidget(self.header_table)
+        layout.addWidget(self.header_group)
 
         # Detection method
         det_layout = QHBoxLayout()
@@ -543,8 +813,8 @@ class ElectropherogramApp(QMainWindow):
         self.canvas.setFocusPolicy(Qt.ClickFocus)
         self.canvas.setFocus()
 
-        QShortcut(QKeySequence(Qt.Key_Delete), self, self._delete_nearest_peak)
-        QShortcut(QKeySequence(Qt.Key_Backspace), self, self._delete_nearest_peak)
+        QShortcut(QKeySequence(Qt.Key_Delete), self, self._delete_selected_or_nearest_peak)
+        QShortcut(QKeySequence(Qt.Key_Backspace), self, self._delete_selected_or_nearest_peak)
         QShortcut(QKeySequence('Ctrl+Z'), self, self._undo)
         QShortcut(QKeySequence('Ctrl+Shift+Z'), self, self._redo)
 
@@ -661,6 +931,14 @@ class ElectropherogramApp(QMainWindow):
         self.call_bases_btn.clicked.connect(self._call_bases)
         self.toolbar.addWidget(self.call_bases_btn)
 
+        self.toolbar.addSeparator()
+        self._esd_caller_combo = QComboBox()
+        self._esd_caller_combo.setToolTip("Select ESD base caller to overlay on trace")
+        self._esd_caller_combo.setFixedWidth(140)
+        self._esd_caller_combo.addItem("Base Calls: None")
+        self._esd_caller_combo.currentTextChanged.connect(self.update_plot)
+        self.toolbar.addWidget(self._esd_caller_combo)
+
         center_layout.addWidget(self.canvas, stretch=5)
 
         self.subplots = []
@@ -693,8 +971,49 @@ class ElectropherogramApp(QMainWindow):
         self.peak_table.customContextMenuRequested.connect(self._table_context_menu)
         center_layout.addWidget(self.peak_table, stretch=1)
 
+        self._esd_seq_label = QLabel()
+        self._esd_seq_label.setWordWrap(True)
+        self._esd_seq_label.setFont(QFont('monospace', 9))
+        self._esd_seq_label.setStyleSheet(
+            "QLabel { background: #fafafa; border: 1px solid #ddd; "
+            "padding: 4px; margin: 2px 0px; }"
+        )
+        self._esd_seq_label.setVisible(False)
+        center_layout.addWidget(self._esd_seq_label)
+
         QShortcut(QKeySequence(Qt.Key_Left), self, self._prev_well_single)
         QShortcut(QKeySequence(Qt.Key_Right), self, self._next_well_single)
+
+        # Replace Home/Back/Forward with Auto X/Y checkboxes
+        for act in self.toolbar.actions():
+            txt = act.text()
+            if txt in ('Home', 'Back', 'Forward'):
+                act.setVisible(False)
+        # Find position after the separator following Forward
+        actions = self.toolbar.actions()
+        insert_idx = None
+        for i, act in enumerate(actions):
+            if act.isSeparator() and i > 0 and not actions[i-1].isVisible():
+                insert_idx = i + 1
+                break
+        if insert_idx is None:
+            insert_idx = 0
+        self._auto_x_btn = QCheckBox("Auto X")
+        self._auto_x_btn.setChecked(True)
+        self._auto_x_btn.setToolTip("Auto-scale X axis when navigating wells")
+        self._auto_x_btn.toggled.connect(lambda on: setattr(self, 'auto_scale_x', on))
+        self._auto_x_btn.setStyleSheet(
+            "QCheckBox::indicator:checked { background-color: #aaddff; border-radius: 2px; }"
+        )
+        self.toolbar.insertWidget(actions[insert_idx], self._auto_x_btn)
+        self._auto_y_btn = QCheckBox("Auto Y")
+        self._auto_y_btn.setChecked(True)
+        self._auto_y_btn.setToolTip("Auto-scale Y axis when navigating wells")
+        self._auto_y_btn.toggled.connect(lambda on: setattr(self, 'auto_scale_y', on))
+        self._auto_y_btn.setStyleSheet(
+            "QCheckBox::indicator:checked { background-color: #aaddff; border-radius: 2px; }"
+        )
+        self.toolbar.insertWidget(actions[insert_idx], self._auto_y_btn)
 
         return center
 
@@ -828,22 +1147,120 @@ class ElectropherogramApp(QMainWindow):
             v = struct.unpack('<IIIII', raw[i:i+20])
             records.append(v)
 
-        # Find end of data: metadata starts when any field exceeds 5000
-        # (ASCII text labels read as uint32 produce values > 10^6)
-        MAX_CHANNEL_VALUE = 5000
-        boundary = len(records)
-        for i, rec in enumerate(records):
-            if any(v > MAX_CHANNEL_VALUE for v in rec):
-                boundary = i
+        # Find the \x05-tagged metadata to know where data ends
+        meta_pos = len(raw)
+        for anchor in [b'\x05\tBAR CODE\x00', b'\x05\x0cBASE CALLER\x00']:
+            idx = raw.find(anchor)
+            if idx >= 0:
+                meta_pos = idx
                 break
+        meta_record = meta_pos // 20
 
-        data = records[:boundary]
+        data = records[:meta_record]
         df = pd.DataFrame(data, columns=['Current', 'Channel1', 'Channel2', 'Channel3', 'Channel4'])
         df['Scan'] = np.arange(len(df))
         return df[['Scan', 'Channel1', 'Channel2', 'Channel3', 'Channel4', 'Current']]
 
+    @staticmethod
+    def _parse_rsd_header(path):
+        """Extract metadata header fields from an .rsd binary file.
+
+        Returns a flat dict with keys like 'MACHINE ID', 'CHANNEL1_DYE', etc.
+        """
+        with open(path, 'rb') as f:
+            raw = f.read()
+        meta = {}
+        # Find the metadata section by locating a known anchor tag.
+        anchor = b'\x05\tBAR CODE\x00'
+        aidx = raw.find(anchor)
+        if aidx < 0:
+            return meta
+
+        # The metadata section is a sequence of \x05-tagged records.
+        # Format: \x05 <length> <length bytes of content (includes trailing \x00)>
+        # The content string ends with \x00. Tags alternate between key/value pairs.
+        # Some keys have binary values (the value is not a \x05-tagged string).
+        KEY_TAGS = {
+            'BAR CODE', 'BASE CALLER', 'CHEMISTRY', 'APPLICATION',
+            'BEAMSPLITTER A', 'BEAMSPLITTER B',
+            'CHANNEL1', 'CHANNEL2', 'CHANNEL3', 'CHANNEL4',
+            'LASER MODE', 'NAME', 'COMMENT', 'MACHINE ID',
+            'PLATE ID', 'SAMPLE NAME', 'WELL ID',
+            'BASE', 'DYE', 'FILTER',
+        }
+        # Parse all tags into a flat list of (content_without_null, raw_bytes)
+        tags = []
+        i = aidx
+        while i < len(raw) - 3:
+            if raw[i] == 0x05:
+                length = raw[i + 1]
+                if i + 2 + length > len(raw):
+                    break
+                tag_raw = raw[i + 2:i + 2 + length]
+                # Content is null-terminated within the length bytes
+                null_pos = tag_raw.find(b'\x00')
+                content = tag_raw[:null_pos].decode('latin-1', errors='replace') if null_pos >= 0 else ''
+                tags.append(content)
+                i += 2 + length
+            else:
+                i += 1
+            # Safety limit
+            if len(tags) > 200:
+                break
+
+        # Now extract key-value pairs from the alternating tag list
+        current_channel = None
+        i = 0
+        while i < len(tags):
+            tag = tags[i]
+            if not tag:
+                i += 1
+                continue
+            if tag.startswith('CHANNEL'):
+                current_channel = tag
+                i += 1
+                while i < len(tags) and not tags[i].startswith('CHANNEL'):
+                    child = tags[i]
+                    # Stop at top-level KEY_TAGS that are not CHANNEL children
+                    if child in KEY_TAGS and child not in ('DYE', 'FILTER', 'BASE'):
+                        break
+                    if child in ('DYE', 'FILTER'):
+                        if i + 1 < len(tags):
+                            meta[f'{current_channel}_{child}'] = tags[i + 1]
+                            i += 1
+                    i += 1
+            elif tag in KEY_TAGS:
+                # Simple key-value pair: next tag is the value
+                if i + 1 < len(tags) and tags[i + 1] not in KEY_TAGS:
+                    meta[tag] = tags[i + 1]
+                    i += 2
+                else:
+                    meta[tag] = ''
+                    i += 1
+            else:
+                i += 1
+
+        return meta
+
+    @staticmethod
+    def _parse_txt_header(path):
+        """Extract metadata header lines from a .txt electropherogram file."""
+        meta = {}
+        with open(path, 'r', encoding='iso-8859-1') as f:
+            for line in f:
+                line = line.rstrip()
+                if line.startswith('Scan') and 'Channel' in line:
+                    break
+                if ':' in line:
+                    key, _, val = line.partition(':')
+                    meta[key.strip()] = val.strip()
+                elif line.strip():
+                    meta.setdefault('Info', []).append(line.strip())
+        return meta
+
     def load_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
+        default_dir = os.path.dirname(os.path.abspath(__file__))
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", default_dir)
         if not folder:
             return
 
@@ -911,9 +1328,95 @@ class ElectropherogramApp(QMainWindow):
             first = sorted(self.all_data.keys())[0]
             self.selected_wells = set(self.all_data.keys())
             self._dirty_wells.update(self.all_data.keys())
+            self._load_peak_data(folder)
+
+            # Scan for ESD subdirectories
+            self._esd_data = {}
+            self._esd_callers = []
+            self._esd_raw_to_display = {}
+            self._esd_display_to_raw = {}
+            from extract_training_data import parse_esd
+            esd_subdirs = []
+            for entry in sorted(os.listdir(folder)):
+                subdir = os.path.join(folder, entry)
+                if not os.path.isdir(subdir):
+                    continue
+                esd_files = [f for f in os.listdir(subdir) if f.lower().endswith('.esd')]
+                if not esd_files:
+                    continue
+                esd_subdirs.append((entry, subdir))
+
+            if esd_subdirs:
+                total_esd = sum(len(ef) for _, ef in
+                                [(s, [f for f in os.listdir(s) if f.lower().endswith('.esd')])
+                                 for _, s in esd_subdirs])
+                esd_progress = QProgressDialog("Loading ESD base calls...", "Cancel", 0, max(total_esd, 1), self)
+                esd_progress.setWindowTitle("Loading ESD")
+                esd_progress.setWindowModality(Qt.WindowModal)
+                esd_count = 0
+                for raw_name, subdir in esd_subdirs:
+                    display_name = esd_caller_display_name(raw_name)
+                    self._esd_callers.append((raw_name, subdir))
+                    self._esd_display_to_raw[display_name] = raw_name
+                    self._esd_raw_to_display[raw_name] = display_name
+                    for fname in sorted(os.listdir(subdir)):
+                        if not fname.lower().endswith('.esd'):
+                            continue
+                        if esd_progress.wasCanceled():
+                            break
+                        esd_progress.setValue(min(esd_count, total_esd)); esd_count += 1
+                        well = os.path.splitext(fname)[0]
+                        if well not in self.all_data:
+                            continue
+                        try:
+                            esd = parse_esd(os.path.join(subdir, fname))
+                            self._esd_data.setdefault(well, {})[raw_name] = esd
+                        except Exception:
+                            pass
+                esd_progress.close()
+            self._update_esd_caller_combo()
+
             self._update_well_styles()
             self._highlight_well(first)
             self.update_plot()
+        self._current_folder = folder
+        self.folder_label.setText(os.path.basename(folder))
+        self._populate_file_header()
+
+    def _populate_file_header(self):
+        """Parse and display user comments from the loaded folder's .rsd files."""
+        if not self._current_folder:
+            self.header_group.setVisible(False)
+            return
+        first_file = None
+        for fname in sorted(os.listdir(self._current_folder)):
+            if fname.lower().endswith('.rsd'):
+                first_file = os.path.join(self._current_folder, fname)
+                break
+        if first_file is None:
+            self.header_group.setVisible(False)
+            return
+
+        meta = self._parse_rsd_header(first_file)
+        comment = meta.get('COMMENT', '')
+        SYSTEM_DEFAULTS = {'Genotyping Default', 'Sequencing Default',
+                           'Fragment Default', 'HID Default', ''}
+
+        rows = []
+        if comment and comment not in SYSTEM_DEFAULTS:
+            rows.append(('Comments', comment))
+        elif comment:
+            rows.append(('Comments', f'{comment} (default)'))
+
+        self._file_header = dict(rows)
+        self.header_table.setRowCount(len(rows))
+        for i, (field, value) in enumerate(rows):
+            self.header_table.setItem(i, 0, QTableWidgetItem(field))
+            val_item = QTableWidgetItem(str(value)[:120])
+            val_item.setToolTip(str(value))
+            self.header_table.setItem(i, 1, val_item)
+        self.header_table.resizeColumnToContents(0)
+        self.header_group.setVisible(len(rows) > 0)
 
     # ------------------------------------------------------------------
     # Well selection / navigation
@@ -1166,15 +1669,18 @@ class ElectropherogramApp(QMainWindow):
         chemistry = self.chemistry_combo.currentText()
         results = {}
         ml_model = None
-        if chemistry == "ML Base Caller":
+        if chemistry in ("ML Base Caller", "ML Scan Caller"):
             try:
-                from basecaller import _load_ml_model
-                ml_model = _load_ml_model()
+                from basecaller import _load_ml_model, MODEL_PATH, MODEL_PATH_WITH_BG
+                model_path = MODEL_PATH_WITH_BG if chemistry == "ML Scan Caller" else MODEL_PATH
+                ml_model = _load_ml_model(model_path)
             except (FileNotFoundError, Exception) as e:
+                model_type = "background-trained" if chemistry == "ML Scan Caller" else ""
                 QMessageBox.critical(
-                    self, "ML Base Caller",
-                    f"Cannot load ML model:\n{e}\n\n"
-                    f"Train it first with: python train_model.py"
+                    self, chemistry,
+                    f"Cannot load {model_type} ML model:\n{e}\n\n"
+                    f"Train it first with:\n"
+                    f"  python train_model.py{ ' --include-background' if chemistry == 'ML Scan Caller' else ''}"
                 )
                 return
         for well in sorted(self.selected_wells):
@@ -1182,10 +1688,10 @@ class ElectropherogramApp(QMainWindow):
                 continue
             df = self.all_data[well]
             self._sync_detector_params()
-            wd = self.detector.detect(df, df["Scan"])
-            if len(wd["peaks"]) == 0:
-                continue
             if chemistry == "ML Base Caller":
+                wd = self.detector.detect_basecalling(df, df["Scan"])
+                if len(wd["peaks"]) == 0:
+                    continue
                 bc = basecall_ml(
                     data=df,
                     peaks=wd["peaks"],
@@ -1193,8 +1699,33 @@ class ElectropherogramApp(QMainWindow):
                     scan_values=wd["scan_values"],
                     model=ml_model,
                     min_quality=10,
+                    auto_threshold=True,
+                )
+            elif chemistry == "ML Scan Caller":
+                from basecaller import basecall_ml_scan
+                bc = basecall_ml_scan(
+                    data=df,
+                    scan_values=df["Scan"],
+                    model=ml_model,
+                    min_confidence=0.8,
+                )
+            elif chemistry == "Cimarron 3.12 (Python)":
+                wd = self.detector.detect_basecalling(df, df["Scan"])
+                if len(wd["peaks"]) == 0:
+                    continue
+                bc = basecall_cimarron(
+                    data=df,
+                    peaks=wd["peaks"],
+                    peak_channels=wd["peak_channels"],
+                    scan_values=wd["scan_values"],
+                    min_quality=10,
+                    spectral_matrix=self._spectral_matrix,
+                    variant=None,
                 )
             else:
+                wd = self.detector.detect_basecalling(df, df["Scan"])
+                if len(wd["peaks"]) == 0:
+                    continue
                 bc = basecall(
                     data=df,
                     peaks=wd["peaks"],
@@ -1332,15 +1863,8 @@ class ElectropherogramApp(QMainWindow):
     # ------------------------------------------------------------------
 
     def _apply_is_filter(self):
-        """Filter peaks in all wells based on IS selection.
-
-        - In the IS channel: keep only the top N peaks by height (N = IS Peak #).
-        - In sample channels: keep only peaks whose scan falls within an IS peak's
-          scan window (left_ips – tolerance … right_ips + tolerance).
-        - Within each channel, limit total peaks to N.
-        - IS peak positions are matched between wells by ordering by scan (i.e. the
-          earliest-eluting canonical IS peak is peak #1 in every well).
-        """
+        """Keep only the selected IS peak(s) in the IS channel.
+        Sample channels are unaffected — IS is only for area normalisation."""
         ch = self._is_channel
         if not ch:
             return
@@ -1348,16 +1872,11 @@ class ElectropherogramApp(QMainWindow):
         if n_is is None or n_is < 1:
             return
 
-        tolerance = 30  # scan points around each IS peak
-
-        # ---- Step 1: for each well, identify the top-N IS channel peaks ----
-        is_info = {}  # well -> {positions, lefts, rights, indices}
         for well, wd in self._well_data.items():
             if well not in self.all_data:
                 continue
             peaks = wd['peaks']
             pchs = wd['peak_channels']
-            sv = wd['scan_values']
 
             is_idx = [i for i, pc in enumerate(pchs) if pc == ch]
             if not is_idx:
@@ -1368,84 +1887,21 @@ class ElectropherogramApp(QMainWindow):
                 continue
             heights = [ch_data[peaks[i]] for i in is_idx]
             top = sorted(is_idx, key=lambda i: heights[is_idx.index(i)], reverse=True)[:n_is]
-            top = sorted(top, key=lambda i: sv[peaks[i]])
-
-            is_info[well] = {
-                'positions': [sv[peaks[i]] for i in top],
-                'lefts': [wd['peak_lefts'][i] for i in top],
-                'rights': [wd['peak_rights'][i] for i in top],
-                'indices': set(top),
-            }
-
-        if not is_info:
-            return
-
-        # ---- Step 2: build median IS peak positions across wells ----
-        n = min(len(v['positions']) for v in is_info.values())
-        if n == 0:
-            return
-
-        median_positions = []
-        median_lefts = []
-        median_rights = []
-        ref_wells = [w for w, v in is_info.items() if len(v['positions']) >= n]
-        for i in range(n):
-            median_positions.append(np.median([is_info[w]['positions'][i] for w in ref_wells]))
-            median_lefts.append(np.median([is_info[w]['lefts'][i] for w in ref_wells]))
-            median_rights.append(np.median([is_info[w]['rights'][i] for w in ref_wells]))
-
-        # ---- Step 3: filter every well's peak list ----
-        for well, wd in self._well_data.items():
-            if well not in is_info:
-                continue
-            peaks = wd['peaks']
-            pchs = wd['peak_channels']
-            sv = wd['scan_values']
-            info = is_info[well]
+            top = set(top)
 
             new_peaks = []
             new_channels = []
             new_lefts = []
             new_rights = []
 
-            for pc in sorted(set(pchs), key=lambda x: int(x.replace('Channel', '') or '0')):
-                mask = np.array([c == pc for c in pchs])
-                pc_peaks = peaks[mask]
-                pc_indices = np.where(mask)[0]
-                pc_lefts = wd['peak_lefts'][mask]
-                pc_rights = wd['peak_rights'][mask]
-
-                keep = []
-                for idx_in_pc, (p, orig_i) in enumerate(zip(pc_peaks, pc_indices)):
-                    scan_val = sv[p]
-                    if pc == ch:
-                        keep.append(orig_i in info['indices'])
-                    else:
-                        inside = False
-                        for j in range(min(n, len(info['positions']))):
-                            l = info['lefts'][j] - tolerance
-                            r = info['rights'][j] + tolerance
-                            if l <= scan_val <= r:
-                                inside = True
-                                break
-                        keep.append(inside)
-
-                if not any(keep):
-                    continue
-
-                keep_idx = [i for i, k in enumerate(keep) if k]
-
-                # Limit per channel to top N by height
-                if len(keep_idx) > n_is:
-                    ch_heights = [wd['channel_data'].get(pc, np.zeros_like(sv))[pc_peaks[i]] for i in keep_idx]
-                    keep_idx = [keep_idx[i] for i in np.argsort(ch_heights)[-n_is:]]
-                    keep_idx.sort()
-
-                for i in keep_idx:
-                    new_peaks.append(pc_peaks[i])
-                    new_channels.append(pc)
-                    new_lefts.append(pc_lefts[i])
-                    new_rights.append(pc_rights[i])
+            for i, pc in enumerate(pchs):
+                if pc == ch:
+                    if i not in top:
+                        continue  # drop this IS peak
+                new_peaks.append(peaks[i])
+                new_channels.append(pc)
+                new_lefts.append(wd['peak_lefts'][i])
+                new_rights.append(wd['peak_rights'][i])
 
             if new_peaks:
                 order = np.argsort(new_peaks)
@@ -1479,6 +1935,16 @@ class ElectropherogramApp(QMainWindow):
                 pass
         self._figure_labels = []
         self._peak_marker_lines.clear()
+
+        # Save axis limits before clearing (for auto-scale toggle)
+        if self.subplots:
+            self._saved_xlim = self.subplots[0]['ax'].get_xlim()
+            self._saved_ylims = [sp['ax'].get_ylim() for sp in self.subplots]
+            self._saved_ylims2 = [sp['ax2'].get_ylim() for sp in self.subplots]
+        else:
+            self._saved_xlim = None
+            self._saved_ylims = []
+            self._saved_ylims2 = []
 
         # Recreate subplots fresh for the right number
         self.figure.clf()
@@ -1576,8 +2042,20 @@ class ElectropherogramApp(QMainWindow):
         else:
             self._active_well = None
 
+        # Restore saved limits if auto-scale is off
+        if not self.auto_scale_x and self._saved_xlim is not None:
+            for sp in self.subplots:
+                sp['ax'].set_xlim(self._saved_xlim)
+        if not self.auto_scale_y and self._saved_ylims:
+            for i, sp in enumerate(self.subplots):
+                if i < len(self._saved_ylims):
+                    sp['ax'].set_ylim(self._saved_ylims[i])
+                if i < len(self._saved_ylims2):
+                    sp['ax2'].set_ylim(self._saved_ylims2[i])
+
         self._apply_is_filter()
         self._draw_peak_markers()
+        self._draw_esd_calls()
         self._populate_table_and_is()
 
         self.canvas.draw()
@@ -1598,6 +2076,80 @@ class ElectropherogramApp(QMainWindow):
         self._draw_peak_markers()
         self._populate_table_and_is()
         self.canvas.draw()
+
+    def _update_esd_caller_combo(self):
+        self._esd_caller_combo.blockSignals(True)
+        self._esd_caller_combo.clear()
+        self._esd_caller_combo.addItem("Base Calls: None")
+        for name, subdir in self._esd_callers:
+            display = esd_caller_display_name(name)
+            self._esd_caller_combo.addItem(display)
+        self._esd_caller_combo.blockSignals(False)
+
+    def _draw_esd_calls(self):
+        display_caller = self._esd_caller_combo.currentText()
+        if not display_caller or display_caller == "Base Calls: None":
+            self._esd_seq_label.setVisible(False)
+            return
+        self._esd_seq_label.setVisible(True)
+        # Resolve display name to raw subdirectory key
+        raw_caller = self._esd_display_to_raw.get(display_caller, display_caller)
+        for sp in self.subplots:
+            well = sp['well']
+            if well is None:
+                continue
+            by_caller = self._esd_data.get(well, {})
+            esd = by_caller.get(raw_caller)
+            if esd is None:
+                continue
+            seq = esd.get('sequence', '')
+            positions = esd.get('peak_positions')
+            quality = esd.get('quality_scores')
+            if not seq or positions is None:
+                continue
+            n = min(len(seq), len(positions))
+            if quality is not None:
+                n = min(n, len(quality))
+            ax = sp['ax']
+            ylim = ax.get_ylim()
+            y_range = ylim[1] - ylim[0]
+            y_pos = ylim[1] - 0.05 * y_range  # near top
+            for i in range(n):
+                pos = int(positions[i])
+                base = seq[i]
+                q = quality[i] if quality is not None else 0
+                if q >= 60:
+                    color = '#1a8a1a'
+                elif q >= 20:
+                    color = '#b0a000'
+                else:
+                    color = '#cc3333'
+                ax.text(pos, y_pos, base, fontsize=6, color=color,
+                        ha='center', va='top', fontfamily='monospace',
+                        weight='bold')
+            # Update sequence display
+            self._update_esd_sequence(seq, positions, quality)
+
+    def _update_esd_sequence(self, seq, positions, quality):
+        if not hasattr(self, '_esd_seq_label') or self._esd_seq_label is None:
+            return
+        lines = []
+        n = len(seq) if quality is None else min(len(seq), len(quality))
+        chunk_size = 100
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            chunk_seq = seq[start:end]
+            if quality is not None:
+                chunk_qual = quality[start:end]
+                qual_str = ''.join(
+                    ' ' if q is None else ('*' if q >= 60 else (':' if q >= 20 else '.'))
+                    for q in chunk_qual
+                )
+                lines.append(f"{start+1:4d}  {chunk_seq}")
+                lines.append(f"        {qual_str}")
+            else:
+                lines.append(f"{start+1:4d}  {chunk_seq}")
+        self._esd_seq_label.setText('\n'.join(lines))
 
     def _draw_peak_markers(self):
         for line in self._peak_marker_lines:
@@ -1623,7 +2175,7 @@ class ElectropherogramApp(QMainWindow):
 
             for ch in sorted(
                 set(peak_channels),
-                key=lambda x: int(x.replace('Channel', '') or '0')
+                key=lambda x: int(str(x).replace('Channel', '') or '0')
             ):
                 mask = [pc == ch for pc in peak_channels]
                 ch_peaks = peaks[mask]
@@ -1684,6 +2236,9 @@ class ElectropherogramApp(QMainWindow):
             self.is_channel_combo.addItem(ch)
         if self._is_channel:
             self.is_channel_combo.setCurrentText(self._is_channel)
+        else:
+            self.is_channel_combo.setCurrentText('Channel3')
+            self._is_channel = 'Channel3'
         ch = self.is_channel_combo.currentText()
         if ch and ch != IS_NONE_OPTION:
             count = sum(1 for row in all_rows if row['channel'] == ch)
@@ -1695,6 +2250,9 @@ class ElectropherogramApp(QMainWindow):
                 self.is_peak_combo.setCurrentText(str(self._is_peak_num))
             elif prev is not None and prev <= count:
                 self.is_peak_combo.setCurrentText(str(prev))
+            else:
+                default_peak = min(4, count)
+                self.is_peak_combo.setCurrentText(str(default_peak))
         self.is_channel_combo.blockSignals(False)
         self.is_peak_combo.blockSignals(False)
         if self._is_peak_num is None and self.is_peak_combo.count() > 0:
@@ -1839,6 +2397,15 @@ class ElectropherogramApp(QMainWindow):
                 self._well_data[clicked_well] = None
                 self._dirty_wells.add(clicked_well)
                 self._redraw_peaks_only(clicked_well)
+
+    def _delete_selected_or_nearest_peak(self):
+        """Delete selected table row, or fall back to nearest peak on plot."""
+        sel = self.peak_table.selectedItems()
+        if sel:
+            row = sel[0].row()
+            self._delete_peak_from_table(row)
+        else:
+            self._delete_nearest_peak()
 
     def _delete_nearest_peak(self):
         if not self._active_well:
@@ -2073,12 +2640,20 @@ class ElectropherogramApp(QMainWindow):
             self.bl_spin.blockSignals(True)
             if method == "Rolling Min":
                 self.bl_label.setText("Window:")
+                old = self.bl_spin.value()
                 self.bl_spin.setRange(10, 5000)
-                self.bl_spin.setValue(500)
+                if old < 10 or old > 5000:
+                    self.bl_spin.setValue(500)
+                else:
+                    self.bl_spin.setValue(old)
             elif method == "ALS":
                 self.bl_label.setText("Lambda (10^x):")
+                old = self.bl_spin.value()
                 self.bl_spin.setRange(2, 9)
-                self.bl_spin.setValue(5)
+                if old < 2 or old > 9:
+                    self.bl_spin.setValue(5)
+                else:
+                    self.bl_spin.setValue(old)
             self.bl_spin.blockSignals(False)
         self._mark_dirty_and_update()
 
@@ -2089,6 +2664,918 @@ class ElectropherogramApp(QMainWindow):
             elif self.toolbar.mode == 'zoom rect':
                 self.toolbar.zoom()
         self.canvas.setFocus()
+
+    # ------------------------------------------------------------------
+    # IS reference & peak clearing
+    # ------------------------------------------------------------------
+
+    def _clear_all_peaks(self):
+        """Remove all detected peaks for the active well."""
+        well = self._active_well
+        if well is None:
+            return
+        # Delete all auto-detected peaks in this well
+        wd = self._well_data.get(well)
+        if wd is None:
+            return
+        n_peaks = len(wd.get('peaks', []))
+        if n_peaks == 0:
+            QMessageBox.information(self, "Clear Peaks", "No peaks to clear.")
+            return
+
+        # Mark all current scan indices as deleted
+        deleted = self._deleted_peaks.setdefault(well, set())
+        for idx in range(n_peaks):
+            deleted.add(idx)
+        # Also clear manual peaks for this well
+        self._manual_peaks[well] = []
+        self.update_plot()
+
+    def _save_is_reference(self):
+        """Save IS reference positions for the whole plate to is_ref_positions.json.
+
+        Tries inter-well consistency across all wells first (accurate per-plate).
+        Falls back to the current well's Ch3 peaks.
+        """
+        from run_is_genotyping import find_consistent_is_refs
+
+        ref_positions = None
+        folder_path = self._current_folder
+        if folder_path and os.path.isdir(folder_path):
+            refs = find_consistent_is_refs(folder_path)
+            if refs is not None:
+                ref_positions = [r[0] for r in refs]
+
+        if ref_positions is None:
+            # Fallback: current well's Ch3 peaks
+            well = self._active_well
+            if well is None:
+                QMessageBox.warning(self, "Save IS Ref.", "No active well and no consistent refs found.")
+                return
+            manual = self._manual_peaks.get(well, [])
+            auto_peaks = []
+            wd = self._well_data.get(well)
+            if wd is not None:
+                for i, scan in enumerate(wd.get('peaks', [])):
+                    ch = wd.get('peak_channels', [''])[i] if i < len(wd.get('peak_channels', [])) else ''
+                    if scan not in {m[0] for m in manual}:
+                        auto_peaks.append((scan, ch))
+            deleted = self._deleted_peaks.get(well, set())
+            auto_peaks = [(s, c) for s, c in auto_peaks if s not in deleted]
+            ch3_peaks = []
+            for scan, ch in manual:
+                if ch == 2 or ch == 'Channel3':
+                    ch3_peaks.append(scan)
+            for scan, ch in auto_peaks:
+                if ch == 2 or ch == 'Channel3':
+                    ch3_peaks.append(scan)
+            if len(ch3_peaks) < 1:
+                QMessageBox.warning(self, "Save IS Ref.",
+                                    "No Channel3 (IS) peaks found.\n"
+                                    "Add IS peaks on Ch3 first.")
+                return
+            ref_positions = sorted(ch3_peaks)
+
+        # Save to is_ref_positions.json keyed by gene name
+        folder_name = os.path.basename(folder_path) if folder_path else ''
+        gene_key = folder_name
+        # Try to extract a concise gene key (e.g. "ABCC2" from "OY_ABCC2_N1_160910Run01")
+        for prefix in ('OY_', 'oy_'):
+            if gene_key.startswith(prefix):
+                parts = gene_key[len(prefix):].split('_')
+                if parts:
+                    gene_key = parts[0]
+                    break
+
+        refs_json_path = os.path.join(os.path.dirname(__file__), 'is_ref_positions.json')
+        import json as _json
+        existing = {}
+        if os.path.exists(refs_json_path):
+            with open(refs_json_path) as _f:
+                existing = _json.load(_f)
+        existing[gene_key] = ref_positions
+        with open(refs_json_path, 'w') as _f:
+            _json.dump(existing, _f, indent=2)
+
+        self._is_ref_scans = ref_positions
+        self.is_ref_label.setText(f"IS ref: {len(ref_positions)} peaks at "
+                                   f"{','.join(str(s) for s in ref_positions)}")
+        QMessageBox.information(self, "Save IS Ref.",
+                                f"Saved {len(ref_positions)} IS ref positions\n"
+                                f"({', '.join(str(s) for s in ref_positions)})\n"
+                                f"to is_ref_positions.json for gene '{gene_key}'.")
+
+    def _train_is_classifier(self):
+        """Train a Random Forest classifier using ALL user-marked Ch3 peaks across wells."""
+        n_expected = self.is_n_spin.value()
+
+        # Collect training data from all wells with exactly n_expected manual Ch3 peaks
+        X_train, y_train = [], []
+        n_pos_wells = 0
+        training_wells = []
+
+        for well in self._get_all_wells():
+            wd = self._well_data.get(well)
+            if wd is None:
+                continue
+            df = self._get_well_trace(well)
+            if df is None:
+                continue
+            ch3 = df['Channel3'].values.astype(float)
+            ch2 = df['Channel2'].values.astype(float)
+            noise = np.std(ch3[:200]) if len(ch3) > 200 else 1.0
+
+            # Get manual Ch3 peaks for this well
+            manual = self._manual_peaks.get(well, [])
+            manual_ch3 = sorted([m[0] for m in manual if m[1] == 2 or m[1] == 'Channel3'])
+
+            # Also include peaks from well_data that are Ch3 and not deleted
+            auto_ch3 = []
+            if wd.get('peaks') is not None:
+                deleted = self._deleted_peaks.get(well, set())
+                for i, s in enumerate(wd['peaks']):
+                    ch_name = wd.get('peak_channels', [''])[i] if i < len(wd.get('peak_channels', [])) else ''
+                    if (ch_name == 2 or ch_name == 'Channel3') and i not in deleted:
+                        auto_ch3.append(int(s))
+
+            all_ch3 = sorted(set(manual_ch3 + auto_ch3))
+
+            if len(all_ch3) != n_expected:
+                continue
+
+            training_wells.append(well)
+            for p in all_ch3:
+                feats = self._is_peak_features(p, ch3, ch2, noise)
+                X_train.append(feats)
+                y_train.append(1)
+            n_pos_wells += 1
+
+            # Negative: non-IS local maxima in this well
+            all_peaks = self._find_ch3_local_maxima(ch3, noise * 3)
+            neg_count = 0
+            pos_set = set(all_ch3)
+            for p in all_peaks:
+                if p in pos_set:
+                    continue
+                if neg_count >= n_expected * 2:
+                    break
+                feats = self._is_peak_features(p, ch3, ch2, noise)
+                X_train.append(feats)
+                y_train.append(0)
+                neg_count += 1
+
+        if n_pos_wells < 1 or len(X_train) < 10:
+            QMessageBox.warning(self, "Train IS Model",
+                                f"Need at least 1 well with exactly {n_expected}"
+                                f" Ch3 peaks marked.\n"
+                                f"Found {n_pos_wells} suitable wells.")
+            return None, 0
+
+        try:
+            from sklearn.ensemble import RandomForestClassifier
+        except ImportError:
+            return None, 0
+
+        clf = RandomForestClassifier(n_estimators=300, max_depth=8,
+                                      class_weight='balanced', random_state=42)
+        clf.fit(np.array(X_train), np.array(y_train))
+        return clf, n_pos_wells
+
+    def _is_peak_features(self, p, ch3, ch2, noise):
+        """Feature vector for IS peak classification at scan position p."""
+        w = 8
+        start = max(0, p - w)
+        end = min(len(ch3), p + w + 1)
+        window = ch3[start:end]
+        window_ch2 = ch2[start:end]
+
+        peak_h = ch3[p]
+        ch2_h = ch2[p]
+        ratio = peak_h / (ch2_h + 1.0)
+        local_min = window.min()
+        prominence = peak_h - local_min
+        local_std = window.std()
+        local_max_ch2 = window_ch2.max()
+
+        # Window samples at fixed offsets from peak
+        offsets = [-7, -5, -3, -1, 0, 1, 3, 5, 7]
+        samples = [ch3[max(0, min(len(ch3)-1, p+o))] for o in offsets]
+
+        return np.array([
+            peak_h / (noise + 1.0),        # SNR
+            ratio,                          # Ch3/Ch2 ratio
+            prominence / (noise + 1.0),     # prominence / noise
+            local_std / (noise + 1.0),      # local std / noise
+            peak_h / (local_max_ch2 + 1.0), # peak / max Ch2 in window
+            *[s / (noise + 1.0) for s in samples],  # signal at offsets
+        ])
+
+    def _find_ch3_local_maxima(self, ch3, threshold):
+        """Find all local maxima in Ch3 above threshold."""
+        from scipy.signal import find_peaks
+        peaks, _ = find_peaks(ch3, height=threshold, distance=3, width=1)
+        return peaks
+
+    def _find_is_peaks(self, silent=False):
+        """Find IS peaks in all loaded wells using saved manual refs or ML.
+
+        Args:
+            silent: If True, suppress success message box.
+        """
+        wells = self._get_all_wells()
+        if not wells:
+            QMessageBox.warning(self, "Find IS Peaks", "No wells loaded.")
+            return
+
+        from run_is_genotyping import find_is_peaks_for_well, find_consistent_is_refs
+
+        # Try per-plate inter-well consistency FIRST (IS peak positions vary between plates)
+        manual_refs = None
+        folder_path = self._current_folder
+        if folder_path and os.path.isdir(folder_path):
+            refs = find_consistent_is_refs(folder_path)
+            if refs is not None:
+                manual_refs = [r[0] for r in refs]
+
+        if manual_refs is None:
+            # Fallback: saved manual ref positions
+            refs_json_path = os.path.join(os.path.dirname(__file__), 'is_ref_positions.json')
+            folder_name = os.path.basename(folder_path) if folder_path else ''
+            if os.path.exists(refs_json_path):
+                import json as _json
+                with open(refs_json_path) as _f:
+                    _all_refs = _json.load(_f)
+                for key in sorted(_all_refs.keys(), key=len, reverse=True):
+                    if key in folder_name or folder_name in key:
+                        manual_refs = _all_refs[key]
+                        break
+
+        if manual_refs is not None:
+            # Force re-detect all wells with current settings (scan range, height, etc.)
+            self._sync_detector_params()
+            self._dirty_wells.update(self._well_data.keys())
+            from scipy.signal import find_peaks as _find_ch3_peaks
+            n_found = 0
+            progress = QProgressDialog("Finding IS peaks...", "Cancel", 0, len(wells), self)
+            progress.setWindowTitle("Find IS Peaks")
+            progress.setWindowModality(Qt.WindowModal)
+            for wi, well in enumerate(wells):
+                if progress.wasCanceled():
+                    break
+                progress.setValue(wi)
+                QApplication.processEvents()
+                self._ensure_well_detected(well)
+                wd = self._well_data.get(well)
+                if wd is None or not isinstance(wd, dict):
+                    continue
+                df = self._get_well_trace(well)
+                if df is None:
+                    continue
+                ch3 = df['Channel3'].values.astype(float)
+                noise = np.std(ch3[:200]) if len(ch3) > 200 else max(np.std(ch3), 1e-10)
+                # Detect peaks on raw Ch3 (no Savgol) to find IS peaks detector may have merged
+                raw_ch3_peaks, _ = _find_ch3_peaks(ch3, height=max(50, 3 * noise),
+                                                    prominence=noise, distance=3, width=1)
+                raw_ch3_peaks = set(int(p) for p in raw_ch3_peaks)
+                # Combine with detector's Ch3 peaks
+                pchs = wd.get('peak_channels', [])
+                existing = set(int(p) for p, pc in zip(wd.get('peaks', []), pchs) if pc == 'Channel3')
+                all_ch3 = raw_ch3_peaks | existing
+                if not all_ch3:
+                    continue
+                assigned = set()
+                for rp in manual_refs:
+                    # Greedy: find nearest unmatched peak within 150 scans
+                    best_pos = None
+                    best_dist = 151
+                    for ap in all_ch3:
+                        if ap in assigned:
+                            continue
+                        d = abs(ap - rp)
+                        if d < best_dist:
+                            best_dist = d
+                            best_pos = ap
+                    if best_pos is None:
+                        continue
+                    assigned.add(best_pos)
+                    if best_pos not in existing:
+                        wd['peaks'] = np.append(wd['peaks'], best_pos)
+                        wd.setdefault('peak_channels', []).append('Channel3')
+                        wd.setdefault('peak_heights', []).append(float(ch3[best_pos]) if ch3 is not None else 0)
+                        wd['peak_lefts'] = np.append(wd.get('peak_lefts', np.array([])), max(0, best_pos - 2))
+                        wd['peak_rights'] = np.append(wd.get('peak_rights', np.array([])), best_pos + 2)
+                n_found += 1
+            progress.close()
+            self.update_plot()
+            QApplication.processEvents()
+            self.status_label.setText("")
+            if not silent:
+                QMessageBox.information(self, "Find IS Peaks",
+                                        f"Found/matched IS peaks in {n_found}/{len(wells)} wells\n"
+                                        f"using saved reference positions {manual_refs}.")
+            return
+
+        # Fall back to ML trained on manual marks
+        self.status_label.setText("Training IS classifier...")
+        QApplication.processEvents()
+        clf, n_train_wells = self._train_is_classifier()
+        if clf is None:
+            self.status_label.setText("")
+            return
+
+        n_expected = self.is_n_spin.value()
+        # Compute reference spacing from the first well that has exactly n_expected peaks
+        ref_spacing = [50]
+        for well in self._get_all_wells():
+            manual = self._manual_peaks.get(well, [])
+            ch3_peaks = sorted([m[0] for m in manual if m[1] == 2 or m[1] == 'Channel3'])
+            if len(ch3_peaks) >= n_expected:
+                ref_spacing = np.diff(ch3_peaks[:n_expected])
+                break
+        n_found = 0
+
+        for well in wells:
+            df = self._get_well_trace(well)
+            if df is None:
+                continue
+            ch3 = df['Channel3'].values.astype(float)
+            ch2 = df['Channel2'].values.astype(float)
+            noise = np.std(ch3[:200]) if len(ch3) > 200 else 1.0
+
+            wd = self._well_data.get(well)
+            if wd is None or not isinstance(wd, dict):
+                self._well_data[well] = None
+                self._dirty_wells.add(well)
+                self._ensure_well_detected(well)
+                wd = self._well_data.get(well)
+                if wd is None or not isinstance(wd, dict):
+                    continue
+
+            # Score every candidate peak with the classifier
+            candidates = self._find_ch3_local_maxima(ch3, noise * 3)
+            if len(candidates) == 0:
+                continue
+
+            X_cand = np.array([self._is_peak_features(p, ch3, ch2, noise)
+                                for p in candidates])
+            scores = clf.predict_proba(X_cand)
+            if scores.shape[1] < 2:
+                continue
+            pos_scores = scores[:, 1]
+
+            # Pick best N peaks matching expected pattern
+            scored = sorted(zip(candidates, pos_scores), key=lambda x: -x[1])
+
+            # Use pattern matching: find the best set of n_expected peaks
+            # that have similar spacing to reference
+            best_set = self._match_is_pattern(scored, n_expected, ref_spacing, ch3, noise)
+
+            if not best_set:
+                continue
+
+            existing_peaks = set(wd.get('peaks', []))
+            n_added = 0
+            for s in best_set:
+                if s not in existing_peaks:
+                    wd['peaks'] = np.append(wd['peaks'], s)
+                    wd.setdefault('peak_channels', []).append('Channel3')
+                    wd.setdefault('peak_heights', []).append(float(ch3[s]))
+                    wd['peak_lefts'] = np.append(wd['peak_lefts'], max(0, s - 2))
+                    wd['peak_rights'] = np.append(wd['peak_rights'], s + 2)
+                    n_added += 1
+            if n_added > 0:
+                n_found += 1
+
+        self.update_plot()
+        self.status_label.setText("")
+        if not silent:
+            QMessageBox.information(self, "Find IS Peaks",
+                                    f"ML trained on {n_expected} IS peaks from {n_train_wells} wells.\n"
+                                    f"Found IS peaks in {n_found}/{len(wells)} wells.")
+
+    def _save_is_model(self):
+        """Train and save the IS RF model + manual peak positions + reference spacing.
+        
+        Accumulates training data across multiple plates: loads existing saved peaks,
+        merges with current plate's peaks, then retrains.
+        """
+        if not self._get_all_wells():
+            QMessageBox.warning(self, "Save IS Model", "No wells loaded.")
+            return
+
+        import joblib, json
+        base = os.path.join(os.path.dirname(__file__), 'is_model')
+        current_folder = os.path.basename(self._current_folder) if self._current_folder else ''
+        n_expected = self.is_n_spin.value()
+
+        # --- Load existing accumulated peak data ---
+        all_peaks = {}  # (folder, well) -> [scan_positions]
+        csv_path = base + '_peaks.csv'
+        if os.path.exists(csv_path):
+            try:
+                old_df = pd.read_csv(csv_path)
+                cols = [c for c in old_df.columns if c.endswith('_scan')]
+                for _, row in old_df.iterrows():
+                    folder = row.get('folder', '')
+                    well = row['well']
+                    scans = sorted(int(row[c]) for c in cols if pd.notna(row[c]))
+                    if scans:
+                        all_peaks[(folder, well)] = scans
+            except Exception:
+                pass
+
+        # --- Add current plate's peaks ---
+        peak_data = {}
+        for well in self._get_all_wells():
+            manual = self._manual_peaks.get(well, [])
+            ch3 = sorted([m[0] for m in manual if m[1] == 2 or m[1] == 'Channel3'])
+            wd = self._well_data.get(well)
+            if wd is not None and wd.get('peaks') is not None and len(wd['peaks']) > 0:
+                deleted = self._deleted_peaks.get(well, set())
+                for i, s in enumerate(wd['peaks']):
+                    ch = wd.get('peak_channels', [''])[i] if i < len(wd.get('peak_channels', [])) else ''
+                    if (ch == 2 or ch == 'Channel3') and i not in deleted:
+                        s_val = int(s)
+                        if s_val not in ch3:
+                            ch3.append(s_val)
+            ch3 = sorted(set(ch3))
+            if len(ch3) > 0:
+                peak_data[well] = ch3
+                all_peaks[(current_folder, well)] = ch3
+
+        if not all_peaks:
+            QMessageBox.warning(self, "Save IS Model", "No IS peaks found.")
+            return
+
+        # --- Retrain on ALL accumulated wells ---
+        X_train, y_train = [], []
+        n_pos_wells = 0
+        ref_spacing = [50]
+
+        for (folder, well), scans in sorted(all_peaks.items()):
+            # Try to find the .rsd file — prefer OY/{folder}/, then current folder, then scan OY/
+            df = None
+            if folder:
+                folder_path = os.path.join(os.path.dirname(__file__), 'OY', folder)
+                rsd_path = os.path.join(folder_path, f"{well}.rsd")
+                txt_path = os.path.join(folder_path, f"{well}.txt")
+                if os.path.exists(rsd_path):
+                    from train_genotyping import parse_rsd
+                    df = parse_rsd(rsd_path)
+                elif os.path.exists(txt_path):
+                    from peak_detector import load_trace_file
+                    df = load_trace_file(txt_path)
+            if df is None:
+                # Search OY subdirs for this well's .rsd
+                oy_dir = os.path.join(os.path.dirname(__file__), 'OY')
+                if os.path.isdir(oy_dir):
+                    for d in os.listdir(oy_dir):
+                        dp = os.path.join(oy_dir, d)
+                        if not os.path.isdir(dp):
+                            continue
+                        rp = os.path.join(dp, f"{well}.rsd")
+                        if os.path.exists(rp):
+                            from train_genotyping import parse_rsd
+                            df = parse_rsd(rp)
+                            break
+            if df is None:
+                continue
+
+            ch3 = df['Channel3'].values.astype(float)
+            ch2 = df['Channel2'].values.astype(float)
+            noise = np.std(ch3[:200]) if len(ch3) > 200 else 1.0
+            scans_sorted = sorted(scans)
+
+            if len(scans_sorted) >= n_expected:
+                # Compute reference spacing from first well with enough peaks
+                if len(ref_spacing) == 1 and ref_spacing[0] == 50:
+                    ref_spacing = [float(x) for x in np.diff(scans_sorted[:n_expected])]
+
+            if len(scans_sorted) < int(n_expected * 0.5):
+                continue
+
+            # Positive examples
+            for p in scans_sorted:
+                feats = self._is_peak_features(p, ch3, ch2, noise)
+                X_train.append(feats)
+                y_train.append(1)
+            n_pos_wells += 1
+
+            # Negative examples
+            all_peaks_pos = self._find_ch3_local_maxima(ch3, noise * 3)
+            neg_count = 0
+            pos_set = set(scans_sorted)
+            for p in all_peaks_pos:
+                if p in pos_set:
+                    continue
+                if neg_count >= n_expected * 2:
+                    break
+                feats = self._is_peak_features(p, ch3, ch2, noise)
+                X_train.append(feats)
+                y_train.append(0)
+                neg_count += 1
+
+        if n_pos_wells < 1 or len(X_train) < 10:
+            QMessageBox.warning(self, "Save IS Model",
+                                f"Could not retrain: only {n_pos_wells} usable wells, {len(X_train)} samples.")
+            return
+
+        try:
+            from sklearn.ensemble import RandomForestClassifier
+        except ImportError:
+            QMessageBox.warning(self, "Save IS Model", "scikit-learn not available.")
+            return
+        clf = RandomForestClassifier(n_estimators=300, max_depth=8,
+                                      class_weight='balanced', random_state=42)
+        clf.fit(np.array(X_train), np.array(y_train))
+        joblib.dump(clf, base + '.pkl')
+
+        # --- Save accumulated peak CSV with folder column ---
+        csv_rows = []
+        for (folder, well), scans in sorted(all_peaks.items()):
+            row = {'folder': folder, 'well': well}
+            for i, s in enumerate(scans[:n_expected]):
+                row[f'is_peak_{i+1}_scan'] = s
+            csv_rows.append(row)
+        if csv_rows:
+            pd.DataFrame(csv_rows).to_csv(csv_path, index=False)
+
+        # --- Save meta: all folders + ref spacing ---
+        folders_used = sorted(set(f for (f, _) in all_peaks))
+        meta = {
+            'n_expected': n_expected,
+            'ref_spacing': [float(x) for x in ref_spacing],
+            'n_train_wells': n_pos_wells,
+            'folders': folders_used,
+            'n_total_wells': len(all_peaks),
+        }
+        with open(base + '_meta.json', 'w') as f:
+            json.dump(meta, f, indent=2)
+
+        QMessageBox.information(self, "Save IS Model",
+                                f"IS model retrained on {n_pos_wells} wells from {len(folders_used)} plate(s).\n"
+                                f"{n_expected} IS peaks expected, {len(all_peaks)} total wells saved.\n"
+                                f"Peak data → {csv_path}")
+
+    def _batch_is_detect(self):
+        """Run IS detection on all matching fragment folders using inter-well consistency."""
+        if not self._current_folder:
+            QMessageBox.warning(self, "Batch IS",
+                                "Load a folder first so we can derive the fragment prefix.")
+            return
+        base_name = os.path.basename(self._current_folder)
+        prefix = '_'.join(base_name.split('_')[:4]) if base_name.startswith('OY_') else base_name.split('_Run')[0]
+
+        oy_dir = os.path.join(os.path.dirname(__file__), 'OY')
+        if not os.path.isdir(oy_dir):
+            QMessageBox.warning(self, "Batch IS", f"OY folder not found at {oy_dir}")
+            return
+        matching = sorted(d for d in os.listdir(oy_dir)
+                         if d.startswith(prefix) and os.path.isdir(os.path.join(oy_dir, d)))
+        if not matching:
+            QMessageBox.warning(self, "Batch IS",
+                                f"No folders matching '{prefix}*' found in OY/")
+            return
+        reply = QMessageBox.question(self, "Batch IS",
+                                     f"Process {len(matching)} folders matching '{prefix}*'?\n"
+                                     + '\n'.join(matching[:10])
+                                     + ('\n...' if len(matching) > 10 else ''),
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        from run_is_genotyping import find_consistent_is_refs, find_is_peaks_for_well
+
+        # Try loading saved manual ref positions
+        import json as _json
+        manual_refs = None
+        refs_json_path = os.path.join(os.path.dirname(__file__), 'is_ref_positions.json')
+        if os.path.exists(refs_json_path):
+            with open(refs_json_path) as _f:
+                _all_refs = _json.load(_f)
+            for key in sorted(_all_refs.keys(), key=len, reverse=True):
+                if key in prefix or prefix in key:
+                    manual_refs = _all_refs[key]
+                    break
+
+        self.status_label.setText("Batch IS detection running...")
+        QApplication.processEvents()
+        results = {}
+        n_ok = 0
+        for folder_name in matching:
+            folder_path = os.path.join(oy_dir, folder_name)
+            if manual_refs:
+                ref_positions = manual_refs
+            else:
+                refs = find_consistent_is_refs(folder_path)
+                if refs is None:
+                    continue
+                ref_positions = [r[0] for r in refs]
+            rsd_files = sorted(glob.glob(os.path.join(folder_path, '*.rsd')))
+            for rsd_path in rsd_files:
+                well = os.path.splitext(os.path.basename(rsd_path))[0]
+                try:
+                    res = find_is_peaks_for_well(rsd_path, ref_positions)
+                    if res:
+                        results.setdefault(folder_name, {})[well] = [int(r[0]) if r else None for r in res]
+                        n_ok += 1
+                except Exception:
+                    continue
+            self.status_label.setText(f"Batch IS: {folder_name} done ({n_ok} wells matched)")
+            QApplication.processEvents()
+
+        out_path = os.path.join(os.path.dirname(__file__), f'is_peaks_{prefix}.csv')
+        rows = []
+        for folder_name, wells in sorted(results.items()):
+            for well, scans in sorted(wells.items()):
+                for i, s in enumerate(scans):
+                    if s is not None:
+                        rows.append({'folder': folder_name, 'well': well,
+                                     f'is_peak_{i+1}_scan': s})
+        if rows:
+            pd.DataFrame(rows).to_csv(out_path, index=False)
+            n_wells = sum(len(w) for w in results.values())
+            QMessageBox.information(self, "Batch IS",
+                                    f"Processed {len(matching)} folders.\n"
+                                    f"Found IS peaks in {n_wells} wells.\n"
+                                    f"Results saved to {out_path}")
+        else:
+            QMessageBox.warning(self, "Batch IS", "No IS peaks found in any folder.")
+        self.status_label.setText("")
+
+    def _train_genotyping(self):
+        """Train genotyping model using Genotyping.xlsx ground truth."""
+        import importlib, sys
+        try:
+            from train_genotyping import main as train_main
+            self.status_label.setText("Training genotyping model...")
+            QApplication.processEvents()
+            train_main()
+            self.status_label.setText("Genotyping model training complete.")
+            QMessageBox.information(self, "Train Genotyping",
+                                    "Genotyping model trained and saved to genotyping_model.pkl")
+        except Exception as e:
+            self.status_label.setText("")
+            QMessageBox.critical(self, "Train Genotyping", f"Training failed:\n{e}")
+
+    def _train_is_only(self):
+        """Train using only IS peaks CSV for the current folder
+        (no Genotyping.xlsx required — uses well_data for genotypes)."""
+        import joblib, glob, os
+        import numpy as np
+        import pandas as pd
+        from run_is_genotyping import parse_rsd, find_is_peaks_for_well
+        from train_genotyping import extract_features_from_trace, LABEL_MAP, SCRIPT_DIR
+
+        folder = self._current_folder
+        if not folder:
+            QMessageBox.warning(self, "Train IS", "No folder loaded.")
+            return
+        folder_name = os.path.basename(folder)
+
+        # Gather wells with exported IS peaks from well_data
+        X_list, y_list = [], []
+        feature_cols = None
+
+        for well in self._get_all_wells():
+            wd = self._well_data.get(well)
+            if wd is None:
+                continue
+            peaks = wd.get('peaks')
+            pchs = wd.get('peak_channels', [])
+            if peaks is None or len(peaks) < 2:
+                continue
+            # Get Ch3 peaks
+            ch3_scans = []
+            for i, s in enumerate(peaks):
+                ch = pchs[i] if i < len(pchs) else ''
+                if ch == 'Channel3' or ch == 2:
+                    ch3_scans.append(int(s))
+            if len(ch3_scans) < 2:
+                continue
+            ch3_scans.sort()
+
+            rsd_path = os.path.join(folder, f"{well}.rsd")
+            if not os.path.exists(rsd_path):
+                continue
+            df = parse_rsd(rsd_path)
+            if len(df) < 50:
+                continue
+
+            ch3 = df['Channel3'].values.astype(float)
+            ispk = [(s, float(ch3[s])) for s in ch3_scans if s < len(ch3)]
+            feats = extract_features_from_trace(df, is_peaks=ispk)
+            if feature_cols is None:
+                feature_cols = sorted([k for k in feats.keys() if k not in ('n_scans',)])
+            row = [feats.get(f, 0.0) for f in feature_cols]
+
+            # Try to get genotype from well_data or from Genotyping.xlsx
+            gt = self._well_data.get(well, {}).get('genotype')
+            if gt is not None:
+                try:
+                    y_list.append(int(gt))
+                    X_list.append(row)
+                except (ValueError, TypeError):
+                    pass
+
+        if len(X_list) < 5:
+            QMessageBox.warning(self, "Train IS",
+                                f"Not enough labeled wells ({len(X_list)}). Mark genotypes first.")
+            return
+
+        X = np.array(X_list)
+        y = np.array(y_list)
+
+        from sklearn.ensemble import RandomForestClassifier
+        clf = RandomForestClassifier(n_estimators=300, max_depth=12, min_samples_leaf=3,
+                                     class_weight='balanced', random_state=42, n_jobs=-1)
+        clf.fit(X, y)
+
+        model_path = os.path.join(SCRIPT_DIR, 'genotyping_model.pkl')
+        joblib.dump(clf, model_path)
+        pd.DataFrame({'feature': feature_cols}).to_csv(
+            model_path.replace('.pkl', '_features.csv'), index=False)
+
+        QMessageBox.information(self, "Train IS",
+                                f"Trained on {len(X)} wells ({len(set(y))} classes).\n"
+                                f"Model saved to genotyping_model.pkl")
+
+    def _export_is_peaks_csv(self):
+        """Export all wells' IS peaks (scan + height) to CSV for ML training."""
+        wells = self._get_all_wells()
+        if not wells:
+            QMessageBox.warning(self, "Export IS CSV", "No wells loaded.")
+            return
+
+        folder_name = os.path.basename(self._current_folder) if self._current_folder else ''
+        rows = []
+        for well in wells:
+            wd = self._well_data.get(well)
+            if wd is None:
+                continue
+            peaks = wd.get('peaks', [])
+            pchs = wd.get('peak_channels', [])
+            phgts = wd.get('peak_heights', [])
+            ch3_peaks = []
+            for i, s in enumerate(peaks):
+                ch = pchs[i] if i < len(pchs) else ''
+                if ch == 2 or ch == 'Channel3':
+                    h = phgts[i] if i < len(phgts) else 0.0
+                    ch3_peaks.append((int(s), float(h)))
+            ch3_peaks.sort(key=lambda x: x[0])
+            if not ch3_peaks:
+                continue
+            row = {'folder': folder_name, 'well': well}
+            for i, (s, h) in enumerate(ch3_peaks[:4]):
+                row[f'is_peak_{i+1}_scan'] = s
+                row[f'is_peak_{i+1}_height'] = h
+            rows.append(row)
+
+        if not rows:
+            QMessageBox.warning(self, "Export IS CSV", "No IS peaks found in any well.")
+            return
+
+        default_name = f'is_peaks_{folder_name}.csv' if folder_name else 'is_peaks.csv'
+        csv_path, _ = QFileDialog.getSaveFileName(
+            self, "Export IS Peaks CSV", os.path.join(os.path.dirname(__file__), default_name),
+            "CSV Files (*.csv);;All Files (*)")
+        if not csv_path:
+            return
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+        QMessageBox.information(self, "Export IS CSV",
+                                f"Exported IS peaks for {len(rows)} wells to\n{csv_path}")
+
+    def _load_is_peaks(self):
+        """Load saved IS peaks CSV and populate well_data for the current folder."""
+        from run_is_genotyping import parse_rsd
+        csv_path, _ = QFileDialog.getOpenFileName(
+            self, "Load IS Peaks CSV", os.path.dirname(__file__),
+            "IS Peaks CSV (is_peaks_*.csv);;CSV Files (*.csv);;All Files (*)")
+        if not csv_path:
+            return
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Load IS Peaks", f"Error reading CSV: {e}")
+            return
+
+        folder_name = os.path.basename(self._current_folder) if self._current_folder else ''
+        folder_df = df[df['folder'] == folder_name]
+        if len(folder_df) == 0:
+            QMessageBox.warning(self, "Load IS Peaks",
+                                f"No entries for current folder '{folder_name}' in CSV.")
+            return
+
+        loaded = 0
+        for well in folder_df['well'].unique():
+            well_df = folder_df[folder_df['well'] == well]
+            peaks = []
+            for col in ['is_peak_1_scan', 'is_peak_2_scan', 'is_peak_3_scan', 'is_peak_4_scan']:
+                vals = well_df[col].dropna().values
+                if len(vals) > 0:
+                    try:
+                        peaks.append(int(float(vals[0])))
+                    except (ValueError, TypeError):
+                        continue
+            if len(peaks) < 2:
+                continue
+            wd = self._well_data.setdefault(well, {})
+            wd['peaks'] = np.array(sorted(peaks))
+            wd['peak_channels'] = ['Channel3'] * len(peaks)
+            lefts = np.array([max(0, p - 2) for p in peaks])
+            rights = np.array([p + 2 for p in peaks])
+            wd['peak_lefts'] = lefts
+            wd['peak_rights'] = rights
+            rsd_path = os.path.join(self._current_folder, f"{well}.rsd")
+            if os.path.exists(rsd_path):
+                try:
+                    trace = parse_rsd(rsd_path)
+                    ch3 = trace['Channel3'].values.astype(float)
+                    wd['peak_heights'] = [float(ch3[p]) for p in peaks if p < len(ch3)]
+                    wd['scan_values'] = trace["Scan"]
+                    wd['channel_data'] = {
+                        'Channel1': trace['Channel1'].values.astype(float),
+                        'Channel2': trace['Channel2'].values.astype(float),
+                        'Channel3': ch3,
+                        'Channel4': trace['Channel4'].values.astype(float),
+                        'Current': trace['Current'].values.astype(float),
+                    }
+                except Exception:
+                    wd['peak_heights'] = [0.0] * len(peaks)
+            else:
+                wd['peak_heights'] = [0.0] * len(peaks)
+            loaded += 1
+
+        if loaded > 0:
+            self.update_plot()
+            QMessageBox.information(self, "Load IS Peaks",
+                                    f"Loaded IS peaks for {loaded} wells.")
+        else:
+            QMessageBox.warning(self, "Load IS Peaks",
+                                "No wells with valid IS peaks found in CSV.")
+
+    def _match_is_pattern(self, scored_candidates, n_expected, ref_spacing, ch3, noise):
+        """Find the best set of n_expected peaks matching the reference spacing pattern.
+
+        Uses a greedy nearest-neighbor approach starting from each top candidate.
+        """
+        if len(scored_candidates) < n_expected:
+            return []
+
+        # Sort by scan position for the pattern matching logic
+        by_scan = sorted(scored_candidates, key=lambda x: x[0])
+        scan_positions = [s for s, _ in by_scan]
+
+        best_score = -1
+        best_set = []
+
+        # Try each top-20 candidate (by classifier score) as the anchor point
+        for anchor_idx in range(min(20, len(scored_candidates))):
+            anchor_scan, anchor_score = scored_candidates[anchor_idx]
+            candidate_set = [int(anchor_scan)]
+            cumulative_score = anchor_score
+
+            # Find anchor's position in scan-sorted list
+            try:
+                scan_idx = scan_positions.index(anchor_scan)
+            except ValueError:
+                continue
+
+            # Walk forward in scan order, matching reference spacing
+            for spacing in ref_spacing:
+                expected = candidate_set[-1] + spacing
+                best_dist = self._is_ref_tolerance
+                best_match = None
+                best_match_score = 0
+                best_j = scan_idx
+                for j in range(scan_idx + 1, len(by_scan)):
+                    s, sc = by_scan[j]
+                    if s > expected + best_dist:
+                        break
+                    dist = abs(s - expected)
+                    if dist < best_dist and s > candidate_set[-1]:
+                        best_dist = dist
+                        best_match = int(s)
+                        best_match_score = sc
+                        best_j = j
+                if best_match is not None:
+                    candidate_set.append(best_match)
+                    cumulative_score += best_match_score
+                    scan_idx = best_j
+                else:
+                    break
+
+            if len(candidate_set) >= n_expected * 0.7:
+                spacing_penalty = 0
+                for i in range(min(len(ref_spacing), len(candidate_set) - 1)):
+                    actual_spacing = candidate_set[i + 1] - candidate_set[i]
+                    spacing_penalty += abs(actual_spacing - ref_spacing[i])
+                total = cumulative_score - spacing_penalty * 0.01
+                if total > best_score:
+                    best_score = total
+                    best_set = candidate_set[:n_expected]
+
+        return best_set
 
     # ------------------------------------------------------------------
     # Clear / Reset
@@ -2124,7 +3611,11 @@ class ElectropherogramApp(QMainWindow):
             sp['ax2'].set_visible(False)
             sp['well'] = None
         self.canvas.draw()
+        self.header_group.setVisible(False)
+        self._current_folder = None
+        self._file_header = {}
         self.status_label.setText("Data cleared")
+        self.folder_label.setText("")
 
     # ------------------------------------------------------------------
     # Save / Export
@@ -2265,6 +3756,391 @@ class ElectropherogramApp(QMainWindow):
             f"Test accuracy: {accuracy:.2f}"
         )
         QMessageBox.information(self, "Train RF", msg)
+
+    def _train_cnn_model(self):
+        """Train the CNN base caller model from within the GUI."""
+        reply = QMessageBox.question(
+            self, "Train CNN",
+            "This will retrain the ML base caller CNN model using\n"
+            "the extracted training data in training_data/.\n\n"
+            "The training process may take several minutes.\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        import subprocess
+        script = os.path.join(os.path.dirname(__file__), 'train_model.py')
+        if not os.path.exists(script):
+            QMessageBox.critical(self, "Train CNN", f"train_model.py not found at {script}")
+            return
+
+        self.status_label.setText("Training CNN model... (see terminal output)")
+        QApplication.processEvents()
+
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, script],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            # Show output in a dialog
+            output = []
+            for line in proc.stdout:
+                output.append(line.rstrip())
+            proc.wait()
+
+            if proc.returncode == 0:
+                QMessageBox.information(
+                    self, "Train CNN",
+                    "Training completed successfully.\n\n"
+                    + "\n".join(output[-10:])
+                )
+            else:
+                QMessageBox.critical(
+                    self, "Train CNN",
+                    f"Training failed (exit code {proc.returncode}).\n\n"
+                    + "\n".join(output[-5:])
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "Train CNN", f"Error launching training:\n{e}")
+
+        self.status_label.setText("CNN training finished" if proc.returncode == 0
+                                  else "CNN training failed")
+
+    # ------------------------------------------------------------------
+    # Genotyping prediction
+    # ------------------------------------------------------------------
+
+    def predict_genotypes(self):
+        """Predict genotyping calls (0/1/2/4) using the trained ML model."""
+        if not hasattr(self, 'all_data') or not self.all_data:
+            QMessageBox.information(self, "Predict Genotypes",
+                                    "No data loaded. Load a folder of .rsd files first.")
+            return
+
+        model_path = os.path.join(os.path.dirname(__file__), 'genotyping_model.pkl')
+        features_path = model_path.replace('.pkl', '_features.csv')
+        if not os.path.exists(model_path):
+            QMessageBox.warning(self, "Predict Genotypes",
+                                f"Trained model not found at {model_path}.\n"
+                                f"Run `python3 train_genotyping.py` first.")
+            return
+
+        try:
+            import joblib
+            from sklearn.ensemble import RandomForestClassifier
+        except ImportError:
+            QMessageBox.critical(self, "Predict Genotypes",
+                                 "scikit-learn/joblib not installed.\n"
+                                 "Install with: pip install scikit-learn joblib")
+            return
+
+        model = joblib.load(model_path)
+        ref_features = pd.read_csv(features_path)['feature'].tolist()
+
+        folder_path = self._current_folder
+        if not folder_path or not os.path.isdir(folder_path):
+            QMessageBox.warning(self, "Predict Genotypes",
+                                "No valid folder loaded. Load a folder of .rsd files first.")
+            return
+
+        # Step 1: Use existing Ch3 peaks from well_data (detector + manual edits).
+        # The user runs the default peak finder, corrects ~10% manually, then predicts.
+        self._sync_detector_params()
+        is_peaks_by_well = {}
+        wells_with_ch3 = 0
+        for well in self._get_all_wells():
+            if well not in self.all_data:
+                continue
+            df = self._get_well_trace(well)
+            if df is None or len(df) < 50:
+                continue
+            ch3 = df['Channel3'].values.astype(float)
+            wd = self._well_data.get(well)
+            if wd is None:
+                continue
+            peaks = wd.get('peaks', [])
+            pchs = wd.get('peak_channels', [])
+            phgts = wd.get('peak_heights', [])
+            ch3_peaks = []
+            for i, s in enumerate(peaks):
+                ch = pchs[i] if i < len(pchs) else ''
+                if ch == 2 or ch == 'Channel3':
+                    h = phgts[i] if i < len(phgts) else float(ch3[int(s)]) if int(s) < len(ch3) else 0.0
+                    ch3_peaks.append((int(s), float(h)))
+            if len(ch3_peaks) >= 2:
+                ch3_peaks.sort(key=lambda x: x[0])
+                is_peaks_by_well[well] = ch3_peaks[:4]
+                wells_with_ch3 += 1
+
+        if wells_with_ch3 < max(4, len(self._get_all_wells()) * 0.5):
+            # Not enough wells have Ch3 peaks — try finding refs automatically
+            from run_is_genotyping import find_consistent_is_refs
+            self.status_label.setText("Finding IS peaks (inter-well consistency)...")
+            QApplication.processEvents()
+            refs = find_consistent_is_refs(folder_path)
+            ref_positions = [r[0] for r in refs] if refs else None
+            if ref_positions is None:
+                refs_json_path = os.path.join(os.path.dirname(__file__), 'is_ref_positions.json')
+                if os.path.exists(refs_json_path):
+                    import json as _json
+                    with open(refs_json_path) as _f:
+                        _all_refs = _json.load(_f)
+                    folder_name = os.path.basename(folder_path)
+                    for key in sorted(_all_refs.keys(), key=len, reverse=True):
+                        if key in folder_name or folder_name in key:
+                            ref_positions = _all_refs[key]
+                            break
+            if ref_positions is not None:
+                # Fallback: raw-trace argmax around refs
+                for well in self._get_all_wells():
+                    if well in is_peaks_by_well or well not in self.all_data:
+                        continue
+                    df = self._get_well_trace(well)
+                    if df is None or len(df) < 50:
+                        continue
+                    ch3 = df['Channel3'].values.astype(float)
+                    noise = np.std(ch3[:200]) if len(ch3) > 200 else max(np.std(ch3), 1e-10)
+                    min_is_height = max(100, 5 * noise)
+                    pairs = []
+                    for ri, rp in enumerate(ref_positions):
+                        lo = max(0, int(rp) - 150)
+                        hi = min(len(ch3), int(rp) + 150)
+                        if hi - lo < 3:
+                            continue
+                        pos = lo + int(np.argmax(ch3[lo:hi]))
+                        h = float(ch3[pos])
+                        if h < min_is_height:
+                            continue
+                        pairs.append((abs(pos - rp), ri, pos, h))
+                    if not pairs:
+                        continue
+                    pairs.sort(key=lambda x: x[0])
+                    assigned_peaks = set()
+                    assigned_refs = set()
+                    is_list = []
+                    for dist, ri, pos, h in pairs:
+                        if ri in assigned_refs or pos in assigned_peaks:
+                            continue
+                        assigned_refs.add(ri)
+                        assigned_peaks.add(pos)
+                        is_list.append((pos, h))
+                    if is_list:
+                        is_peaks_by_well[well] = sorted(is_list, key=lambda x: x[0])
+
+        # Extract features using the found IS peaks
+        self.status_label.setText("Extracting features...")
+        QApplication.processEvents()
+        all_wells_sorted = self._get_all_wells()
+        X_list, well_ids = [], []
+        peak_info_list = []  # per-well IS/sample peak info for table
+
+        for well in all_wells_sorted:
+            df = self._get_well_trace(well)
+            if df is None or len(df) < 50:
+                continue
+
+            from train_genotyping import extract_features_from_trace
+            try:
+                isp = is_peaks_by_well.get(well)
+                feats = extract_features_from_trace(df, is_peaks=isp)
+            except Exception:
+                continue
+
+            # Extract IS peak scan/height info for display
+            is_scans = [int(feats.get(f'IS_peak_{i}_scan', 0))
+                        for i in range(1, 5)]
+            is_heights = [float(feats.get(f'IS_peak_{i}_height', 0.0))
+                          for i in range(1, 5)]
+
+            # Find sample peaks: highest Ch1 and Ch2 peaks
+            from scipy.signal import find_peaks
+            ch1_max_scan, ch1_max_hgt = 0, 0.0
+            ch2_max_scan, ch2_max_hgt = 0, 0.0
+            try:
+                y1 = df['Channel1'].values.astype(float)
+                noise1 = np.std(y1[:200]) if len(y1) > 200 else np.std(y1)
+                p1, props1 = find_peaks(y1, height=max(50, 3*noise1),
+                                         prominence=1.5*noise1, distance=5)
+                if len(p1) > 0:
+                    h1 = props1['peak_heights']
+                    idx = np.argmax(h1)
+                    ch1_max_scan = int(p1[idx])
+                    ch1_max_hgt = float(h1[idx])
+
+                y2 = df['Channel2'].values.astype(float)
+                noise2 = np.std(y2[:200]) if len(y2) > 200 else np.std(y2)
+                p2, props2 = find_peaks(y2, height=max(50, 3*noise2),
+                                         prominence=1.5*noise2, distance=5)
+                if len(p2) > 0:
+                    h2 = props2['peak_heights']
+                    idx = np.argmax(h2)
+                    ch2_max_scan = int(p2[idx])
+                    ch2_max_hgt = float(h2[idx])
+            except Exception:
+                pass
+
+            # Align to reference feature set
+            row = []
+            for f in ref_features:
+                row.append(feats.get(f, 0.0))
+            X_list.append(row)
+            well_ids.append(well)
+            peak_info_list.append({
+                'is_scans': is_scans,
+                'is_heights': is_heights,
+                'ch1_scan': ch1_max_scan,
+                'ch1_hgt': ch1_max_hgt,
+                'ch2_scan': ch2_max_scan,
+                'ch2_hgt': ch2_max_hgt,
+            })
+
+        if len(X_list) == 0:
+            QMessageBox.warning(self, "Predict Genotypes",
+                                "Could not extract features from any loaded wells.")
+            return
+
+        X_raw = np.array(X_list)
+        from train_genotyping import LABEL_UNMAP
+
+        # Per-plate normalization
+        median = np.median(X_raw, axis=0)
+        p75 = np.percentile(X_raw, 75, axis=0)
+        p25 = np.percentile(X_raw, 25, axis=0)
+        iqr = np.maximum(p75 - p25, 1e-8)
+        X = (X_raw - median) / iqr
+
+        y_prob = model.predict_proba(X)
+        y_pred = model.predict(X)
+
+        # Show results in a dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Genotype Predictions")
+        dialog.resize(600, 500)
+
+        layout = QVBoxLayout(dialog)
+
+        # Summary stats
+        from collections import Counter
+        counts = Counter(y_pred)
+        summary_items = []
+        for k in sorted(counts):
+            name = LABEL_UNMAP.get(k, f"Label {k}")
+            summary_items.append(f"{name} ({k}): {counts[k]}")
+        layout.addWidget(QLabel(f"Prediction Summary:  {' | '.join(summary_items)}"))
+
+        # Table
+        headers = ['Well', 'Prediction', 'Confidence',
+                    'P(Fail)', 'P(Hom1)', 'P(Hom2)', 'P(Het)',
+                    'Ch1_max_scan', 'Ch1_max_hgt',
+                    'Ch2_max_scan', 'Ch2_max_hgt',
+                    'IS_1_scan', 'IS_1_hgt',
+                    'IS_2_scan', 'IS_2_hgt',
+                    'IS_3_scan', 'IS_3_hgt',
+                    'IS_4_scan', 'IS_4_hgt']
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(well_ids))
+
+        for i, well in enumerate(well_ids):
+            col = 0
+            table.setItem(i, col, QTableWidgetItem(well))
+            col += 1
+            pred_int = int(y_pred[i])
+            pred_name = LABEL_UNMAP.get(pred_int, str(pred_int))
+            table.setItem(i, col, QTableWidgetItem(f"{pred_name} ({pred_int})"))
+            col += 1
+
+            if y_prob.shape[1] >= 4:
+                conf = float(np.max(y_prob[i])) * 100
+                table.setItem(i, col, QTableWidgetItem(f"{conf:.1f}%"))
+                col += 1
+                for j, orig_lbl in enumerate([0, 1, 2, 4]):
+                    cidx = list(model.classes_).index(orig_lbl) if orig_lbl in model.classes_ else -1
+                    if cidx >= 0:
+                        pct = float(y_prob[i][cidx]) * 100
+                        table.setItem(i, col, QTableWidgetItem(f"{pct:.1f}%"))
+                    col += 1
+            else:
+                col += 5  # skip prob columns if not available
+
+            # Peak info columns
+            pi = peak_info_list[i]
+            table.setItem(i, col, QTableWidgetItem(str(pi['ch1_scan']))); col += 1
+            table.setItem(i, col, QTableWidgetItem(f"{pi['ch1_hgt']:.0f}")); col += 1
+            table.setItem(i, col, QTableWidgetItem(str(pi['ch2_scan']))); col += 1
+            table.setItem(i, col, QTableWidgetItem(f"{pi['ch2_hgt']:.0f}")); col += 1
+            for s, h in zip(pi['is_scans'], pi['is_heights']):
+                table.setItem(i, col, QTableWidgetItem(str(s) if s > 0 else '')); col += 1
+                table.setItem(i, col, QTableWidgetItem(f"{h:.0f}" if h > 0 else '')); col += 1
+
+        table.resizeColumnsToContents()
+        layout.addWidget(table)
+
+        btn_layout = QHBoxLayout()
+        copy_btn = QPushButton("Copy Table")
+        def _copy_table():
+            import csv, io
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow([table.horizontalHeaderItem(c).text() for c in range(table.columnCount())])
+            for r in range(table.rowCount()):
+                w.writerow(table.item(r, c).text() if table.item(r, c) else ''
+                           for c in range(table.columnCount()))
+            QApplication.clipboard().setText(buf.getvalue())
+        copy_btn.clicked.connect(_copy_table)
+        btn_layout.addWidget(copy_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addStretch()
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+        dialog.exec_()
+
+    def _get_well_trace(self, well):
+        """Get the parsed trace DataFrame for a well, from cache or by parsing."""
+        if hasattr(self, 'all_data') and well in self.all_data:
+            return self.all_data[well]
+        if hasattr(self, '_original_all_data') and well in self._original_all_data:
+            return self._original_all_data[well]
+        # Try parsing the .rsd file directly
+        folder = getattr(self, '_current_folder', None)
+        if folder is None:
+            return None
+        rsd_path = os.path.join(folder, f"{well}.rsd")
+        txt_path = os.path.join(folder, f"{well}.txt")
+        if os.path.exists(rsd_path):
+            from train_genotyping import parse_rsd
+            return parse_rsd(rsd_path)
+        elif os.path.exists(txt_path):
+            from peak_detector import load_trace_file
+            return load_trace_file(txt_path)
+        return None
+
+    def _get_all_wells(self):
+        """Get sorted list of all wells from loaded data."""
+        if hasattr(self, 'all_data') and self.all_data:
+            wells = sorted(self.all_data.keys(), key=self._well_sort_key)
+            if wells:
+                return wells
+        folder = getattr(self, '_current_folder', None)
+        if folder is not None and os.path.isdir(folder):
+            rsd_files = sorted(glob.glob(os.path.join(folder, '*.rsd')))
+            return sorted(set(os.path.splitext(os.path.basename(f))[0]
+                             for f in rsd_files), key=self._well_sort_key)
+        return []
+
+    def _well_sort_key(self, w):
+        row = w[0] if w else 'A'
+        try:
+            col = int(w[1:]) if len(w) > 1 else 0
+        except ValueError:
+            col = 0
+        return (row, col)
 
     # ------------------------------------------------------------------
     # Legacy compat stubs

@@ -14,6 +14,23 @@ ALS_P = 0.01
 ALS_NITER = 10
 PEAK_CHANNEL_NAMES = ['Channel1', 'Channel2', 'Channel3', 'Channel4']
 
+# Basecalling dye chemistry: channel -> base mapping for ET Terminators
+# Channel 1 = T, Channel 2 = G, Channel 3 = C, Channel 4 = A
+CHEMISTRY_MAP = {0: "T", 1: "G", 2: "C", 3: "A"}
+
+# Dye mobility offsets (scans): each dye label shifts migration speed
+# Ch1(T) moves fastest → detected earlier → offset -3
+# Ch2(G) slightly faster → offset -1
+# Ch3(C) slightly slower → offset +1
+# Ch4(A) slowest → offset +3
+MOBILITY_OFFSET = [-3, -1, 1, 3]
+
+# Default basecalling peak detection parameters
+DEFAULT_HEIGHT = 15
+DEFAULT_PROMINENCE = 10
+DEFAULT_DISTANCE = 5
+DEFAULT_NMS_DISTANCE = 5
+
 
 class PeakDetector:
     def __init__(self, params=None):
@@ -205,6 +222,102 @@ class PeakDetector:
             'channel_data': channel_data,
             'channel_baselines': channel_baselines,
             'noise_levels': noise_levels,
+            'scan': scan,
+            'scan_values': scan_values,
+        }
+
+    def detect_basecalling(self, df, scan, height=DEFAULT_HEIGHT,
+                           prominence=DEFAULT_PROMINENCE,
+                           per_channel_distance=DEFAULT_DISTANCE,
+                           nms_distance=DEFAULT_NMS_DISTANCE):
+        """Basecalling-specific peak detection with mobility correction.
+
+        Detects peaks per-channel, applies dye-specific mobility offsets,
+        then merges nearby peaks using non-maximum suppression (NMS).
+
+        This accounts for different fluorophore migration rates between
+        channels — essential for accurate base calling.
+
+        Returns same dict as detect() with 'peaks' and 'peak_channels'.
+        """
+        scan_values = scan.values
+        n_scans = len(df)
+        ch_data = df[PEAK_CHANNEL_NAMES].values.astype(np.float64)
+
+        # Per-channel baseline correction and smoothing
+        candidates = []
+        for i, ch_name in enumerate(PEAK_CHANNEL_NAMES):
+            y_raw = ch_data[:, i]
+            y_corrected, _ = self.correct_baseline(y_raw)
+            try:
+                y_smooth = savgol_filter(y_corrected, SAVGOL_WINDOW, SAVGOL_ORDER)
+            except Exception:
+                y_smooth = y_corrected
+
+            peaks, props = find_peaks(
+                y_smooth, height=height, prominence=prominence,
+                distance=per_channel_distance,
+            )
+
+            if self.limit_range:
+                mask = ((scan_values[peaks] >= self.scan_start) &
+                        (scan_values[peaks] <= self.scan_end))
+                peaks = peaks[mask]
+                if 'peak_heights' in props:
+                    props['peak_heights'] = props['peak_heights'][mask]
+
+            for j, p in enumerate(peaks):
+                corr = p + MOBILITY_OFFSET[i]
+                if 0 <= corr < n_scans:
+                    h = props['peak_heights'][j] if 'peak_heights' in props else y_smooth[p]
+                    candidates.append((corr, h))
+
+        if not candidates:
+            return {
+                'peaks': np.array([], dtype=int),
+                'peak_channels': [],
+                'peak_lefts': np.array([]),
+                'peak_rights': np.array([]),
+                'channel_data': {},
+                'channel_baselines': {},
+                'noise_levels': {},
+                'scan': scan,
+                'scan_values': scan_values,
+            }
+
+        # Sort by height descending, greedy NMS
+        candidates.sort(key=lambda x: -x[1])
+        selected = []
+        for pos, h in candidates:
+            if all(abs(pos - s_pos) > nms_distance for s_pos, _ in selected):
+                selected.append((pos, h))
+
+        selected.sort(key=lambda x: x[0])
+        peaks_arr = np.array([p for p, _ in selected], dtype=int)
+        # Assign each peak to a channel based on the original candidate's source
+        peak_channels = []
+        for pos, _ in selected:
+            # Find which channel contributed this position
+            best_ch = 'Current'
+            best_d = nms_distance + 1
+            for i in range(4):
+                # Check if this channel had a peak that maps to this position
+                for p in range(int(pos - nms_distance), int(pos + nms_distance + 1)):
+                    if 0 <= p < n_scans:
+                        corr = p + MOBILITY_OFFSET[i]
+                        if abs(corr - pos) <= 2:
+                            best_ch = PEAK_CHANNEL_NAMES[i]
+                            break
+            peak_channels.append(best_ch)
+
+        return {
+            'peaks': peaks_arr,
+            'peak_channels': peak_channels,
+            'peak_lefts': np.full_like(peaks_arr, 0.0),
+            'peak_rights': np.full_like(peaks_arr, 0.0),
+            'channel_data': {},
+            'channel_baselines': {},
+            'noise_levels': {},
             'scan': scan,
             'scan_values': scan_values,
         }
