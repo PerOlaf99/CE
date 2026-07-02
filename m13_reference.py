@@ -27,8 +27,14 @@ def save_reference(dir_path):
     print(f"Saved M13 reference ({len(M13_REFERENCE)} bp) to {path}")
 
 
+import re
+
+
 def align_to_reference(query, ref=None, gap_open=-10, gap_extend=-1, match=2, mismatch=-3):
-    """Smith-Waterman local alignment using swalign (affine gaps, fast).
+    """Local alignment to M13 reference using edlib (fast, unit-cost edit distance).
+
+    Uses edlib HW mode to find the best infix match, then parses the CIGAR
+    to produce alignment strings.  ~1000x faster than pure-Python SW.
 
     Returns dict with alignment info.
     """
@@ -39,25 +45,28 @@ def align_to_reference(query, ref=None, gap_open=-10, gap_extend=-1, match=2, mi
     if len(query_clean) < 10:
         return _empty_alignment()
 
-    import swalign
-    matrix = swalign.NucleotideScoringMatrix(match=match, mismatch=mismatch)
-    sw = swalign.LocalAlignment(matrix, gap_penalty=gap_open,
-                                gap_extension_penalty=gap_extend)
-    try:
-        align = sw.align(query_clean, ref)
-    except:
+    result = edlib.align(query_clean, ref, mode='HW', task='path')
+
+    if result['editDistance'] is None or result['cigar'] is None:
         return _empty_alignment()
 
-    if align.score == 0:
-        return _empty_alignment()
+    locations = result['locations'][0]
+    ref_start = locations[0]
+    ref_end = locations[1]
+    cigar = result['cigar']
 
-    # Build aligned sequences from CIGAR
-    cigar = align.cigar
-    q_aligned_parts, r_aligned_parts = [], []
-    q_pos, r_pos = 0, 0
+    # Parse CIGAR: alternating numbers and operations
+    parts = re.findall(r'\d+|[MIDNSHP=X]', cigar)
 
-    for length, op in cigar:
-        if op == 'M':
+    q_aligned_parts = []
+    r_aligned_parts = []
+    q_pos = 0
+    r_pos = ref_start
+
+    for k in range(0, len(parts), 2):
+        length = int(parts[k])
+        op = parts[k + 1]
+        if op in ('=', 'M', 'X'):
             q_seg = query_clean[q_pos:q_pos + length]
             r_seg = ref[r_pos:r_pos + length]
             q_aligned_parts.append(q_seg)
@@ -76,16 +85,21 @@ def align_to_reference(query, ref=None, gap_open=-10, gap_extend=-1, match=2, mi
     q_aligned = ''.join(q_aligned_parts)
     r_aligned = ''.join(r_aligned_parts)
 
+    matches = sum(1 for a, b in zip(q_aligned, r_aligned) if a == b)
+    identity = matches / len(q_aligned) if q_aligned else 0
+
     return {
-        'query_start': align.q_pos, 'ref_start': align.r_pos,
-        'query_end': align.q_end, 'ref_end': align.r_end,
+        'query_start': 0,
+        'ref_start': ref_start,
+        'query_end': q_pos,
+        'ref_end': ref_end,
         'aligned_length': len(q_aligned),
-        'matches': align.matches,
-        'mismatches': align.mismatches,
-        'identity': align.identity,
+        'matches': matches,
+        'mismatches': len(q_aligned) - matches,
+        'identity': identity,
         'query_aligned': q_aligned,
         'ref_aligned': r_aligned,
-        'score': align.score,
+        'score': -result['editDistance'],
     }
 
 
