@@ -4069,71 +4069,80 @@ class ElectropherogramApp(QMainWindow):
                     if is_list:
                         is_peaks_by_well[well] = sorted(is_list, key=lambda x: x[0])
 
-        # Extract features using the found IS peaks
+        # Use simple features matching Train IS
         self.status_label.setText("Extracting features...")
         QApplication.processEvents()
         all_wells_sorted = self._get_all_wells()
         X_list, well_ids = [], []
-        peak_info_list = []  # per-well IS/sample peak info for table
+        peak_info_list = []
+        simple_keys = None
+
+        # Determine feature type from model features file
+        use_simple = True
+        try:
+            ref_feats = pd.read_csv(features_path)['feature'].tolist()
+            simple_feat_names = ['IS_1_scan', 'IS_1_hgt', 'Channel1_mean', 'Channel2_max_peak_hgt',
+                                 'IS_Ch2_ratio_mean', 'Channel3_std']
+            if any(f in ref_feats for f in simple_feat_names):
+                use_simple = True
+        except Exception:
+            use_simple = False
 
         for well in all_wells_sorted:
             df = self._get_well_trace(well)
             if df is None or len(df) < 50:
                 continue
 
-            from train_genotyping import extract_features_from_trace
             try:
                 isp = is_peaks_by_well.get(well)
-                feats = extract_features_from_trace(df, is_peaks=isp)
+                feats = self._extract_simple_features(df, is_peaks=isp)
             except Exception:
                 continue
 
-            # Extract IS peak scan/height info for display
-            is_scans = [int(feats.get(f'IS_peak_{i}_scan', 0))
-                        for i in range(1, 5)]
-            is_heights = [float(feats.get(f'IS_peak_{i}_height', 0.0))
-                          for i in range(1, 5)]
-
-            # Find sample peaks: highest Ch1 and Ch2 peaks
-            from scipy.signal import find_peaks
-            ch1_max_scan, ch1_max_hgt = 0, 0.0
-            ch2_max_scan, ch2_max_hgt = 0, 0.0
-            try:
-                y1 = df['Channel1'].values.astype(float)
-                noise1 = np.std(y1[:200]) if len(y1) > 200 else np.std(y1)
-                p1, props1 = find_peaks(y1, height=max(50, 3*noise1),
-                                         prominence=1.5*noise1, distance=5)
-                if len(p1) > 0:
-                    h1 = props1['peak_heights']
-                    idx = np.argmax(h1)
-                    ch1_max_scan = int(p1[idx])
-                    ch1_max_hgt = float(h1[idx])
-
-                y2 = df['Channel2'].values.astype(float)
-                noise2 = np.std(y2[:200]) if len(y2) > 200 else np.std(y2)
-                p2, props2 = find_peaks(y2, height=max(50, 3*noise2),
-                                         prominence=1.5*noise2, distance=5)
-                if len(p2) > 0:
-                    h2 = props2['peak_heights']
-                    idx = np.argmax(h2)
-                    ch2_max_scan = int(p2[idx])
-                    ch2_max_hgt = float(h2[idx])
-            except Exception:
-                pass
-
-            # Align to reference feature set
-            row = []
-            for f in ref_features:
-                row.append(feats.get(f, 0.0))
+            if simple_keys is None:
+                simple_keys = sorted(feats.keys())
+            row = [feats.get(f, 0.0) for f in simple_keys]
             X_list.append(row)
             well_ids.append(well)
+
+            # Extract display info
+            is_scans = [int(feats.get(f'IS_{i}_scan', 0)) for i in range(1, 5)]
+            is_heights = [float(feats.get(f'IS_{i}_hgt', 0.0)) for i in range(1, 5)]
+            ch1_scan = int(feats.get('Channel1_max_peak_scan', 0))
+            ch1_hgt = float(feats.get('Channel1_max_peak_hgt', 0.0))
+            ch2_scan = int(feats.get('Channel2_max_peak_scan', 0))
+            ch2_hgt = float(feats.get('Channel2_max_peak_hgt', 0.0))
+
+            # Fallback to separate detection if simple feats returned zeros
+            if ch1_scan == 0 and ch1_hgt == 0.0:
+                from scipy.signal import find_peaks
+                try:
+                    y1 = df['Channel1'].values.astype(float)
+                    n1 = np.std(y1[:200]) if len(y1) > 200 else np.std(y1)
+                    p1 = find_peaks(y1, height=max(50, 3*n1), prominence=1.5*n1, distance=5)[0]
+                    if len(p1) > 0:
+                        h1 = df['Channel1'].values.astype(float)[p1]
+                        idx = int(p1[np.argmax(h1)])
+                        ch1_scan = idx
+                        ch1_hgt = float(np.max(h1))
+                except Exception:
+                    pass
+                try:
+                    y2 = df['Channel2'].values.astype(float)
+                    n2 = np.std(y2[:200]) if len(y2) > 200 else np.std(y2)
+                    p2 = find_peaks(y2, height=max(50, 3*n2), prominence=1.5*n2, distance=5)[0]
+                    if len(p2) > 0:
+                        h2 = df['Channel2'].values.astype(float)[p2]
+                        idx = int(p2[np.argmax(h2)])
+                        ch2_scan = idx
+                        ch2_hgt = float(np.max(h2))
+                except Exception:
+                    pass
+
             peak_info_list.append({
-                'is_scans': is_scans,
-                'is_heights': is_heights,
-                'ch1_scan': ch1_max_scan,
-                'ch1_hgt': ch1_max_hgt,
-                'ch2_scan': ch2_max_scan,
-                'ch2_hgt': ch2_max_hgt,
+                'is_scans': is_scans, 'is_heights': is_heights,
+                'ch1_scan': ch1_scan, 'ch1_hgt': ch1_hgt,
+                'ch2_scan': ch2_scan, 'ch2_hgt': ch2_hgt,
             })
 
         if len(X_list) == 0:
@@ -4144,7 +4153,6 @@ class ElectropherogramApp(QMainWindow):
         X_raw = np.array(X_list)
         from train_genotyping import LABEL_UNMAP
 
-        # Per-plate normalization
         median = np.median(X_raw, axis=0)
         p75 = np.percentile(X_raw, 75, axis=0)
         p25 = np.percentile(X_raw, 25, axis=0)
@@ -4154,14 +4162,12 @@ class ElectropherogramApp(QMainWindow):
         y_prob = model.predict_proba(X)
         y_pred = model.predict(X)
 
-        # Show results in a dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("Genotype Predictions")
         dialog.resize(600, 500)
 
         layout = QVBoxLayout(dialog)
 
-        # Summary stats
         from collections import Counter
         counts = Counter(y_pred)
         summary_items = []
@@ -4170,7 +4176,6 @@ class ElectropherogramApp(QMainWindow):
             summary_items.append(f"{name} ({k}): {counts[k]}")
         layout.addWidget(QLabel(f"Prediction Summary:  {' | '.join(summary_items)}"))
 
-        # Table
         headers = ['Well', 'Prediction', 'Confidence',
                     'P(Fail)', 'P(Hom1)', 'P(Hom2)', 'P(Het)',
                     'Ch1_max_scan', 'Ch1_max_hgt',
@@ -4197,16 +4202,15 @@ class ElectropherogramApp(QMainWindow):
                 conf = float(np.max(y_prob[i])) * 100
                 table.setItem(i, col, QTableWidgetItem(f"{conf:.1f}%"))
                 col += 1
-                for j, orig_lbl in enumerate([0, 1, 2, 4]):
+                for orig_lbl in [0, 1, 2, 4]:
                     cidx = list(model.classes_).index(orig_lbl) if orig_lbl in model.classes_ else -1
                     if cidx >= 0:
                         pct = float(y_prob[i][cidx]) * 100
                         table.setItem(i, col, QTableWidgetItem(f"{pct:.1f}%"))
                     col += 1
             else:
-                col += 5  # skip prob columns if not available
+                col += 5
 
-            # Peak info columns
             pi = peak_info_list[i]
             table.setItem(i, col, QTableWidgetItem(str(pi['ch1_scan']))); col += 1
             table.setItem(i, col, QTableWidgetItem(f"{pi['ch1_hgt']:.0f}")); col += 1
