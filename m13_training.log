@@ -73,3 +73,5 @@ Epoch 1/300
 Epoch 2/300
 900/900 - 41s - 46ms/step - accuracy: 0.3313 - loss: 1.3414 - val_accuracy: 0.3443 - val_loss: 1.3306 - learning_rate: 3.0000e-04
 Epoch 3/300
+900/900 - 27s - 30ms/step - accuracy: 0.3478 - loss: 1.3254 - val_accuracy: 0.3377 - val_loss: 1.3249 - learning_rate: 3.0000e-04
+Epoch 4/300
