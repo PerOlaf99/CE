@@ -6,3 +6,7 @@
 [22:23:13] Normalization done in 2s
 [22:23:13] 
 === Quick sanity: RF on A01 with z-score ===
+[22:23:17] RF 5-fold CV on A01 (well_zscore): 96.4%
+[22:23:17] 
+=== RF LOTO: raw ===
+[22:23:17]   LOTO RF: 96 wells, X (83266, 31, 4), 500 trees
