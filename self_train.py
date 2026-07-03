@@ -55,10 +55,14 @@ def extract_windows(sep, positions):
     return np.array(windows, dtype=np.float32), np.array(valid)
 
 
-def find_peaks_from_trace(sep_norm, height=30, distance=3, prominence=10):
-    signal = sep_norm.sum(axis=0)
-    peaks, _ = find_peaks(signal, height=height, distance=distance, prominence=prominence)
-    return peaks
+def find_peaks_from_trace(sep_raw, height=30, distance=3, prominence=15):
+    """Detect peaks on raw (non-normalized) separated traces, per-channel."""
+    all_peaks = set()
+    for c in range(4):
+        peaks, _ = find_peaks(sep_raw[c], height=height, distance=distance, prominence=prominence)
+        for p in peaks:
+            all_peaks.add(int(p))
+    return sorted(all_peaks)
 
 
 def load_esd_labels(wells):
@@ -281,7 +285,10 @@ def main():
     print(f"Train wells: {train_wells[0]}-{train_wells[-1]} ({len(train_wells)})")
     print(f"Eval wells:  {eval_wells[0]}-{eval_wells[-1]} ({len(eval_wells)})")
 
-    history, model = self_train_loop(train_wells, eval_wells, n_iters=3, threshold=0.95)
+    npz_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'training_data_separated', 'Cp312.npz')
+    history, model = self_train_loop(train_wells, eval_wells, n_iters=3, threshold=0.95,
+                                     npz_path=npz_path if os.path.exists(npz_path) else None)
 
     print(f"\n{'='*60}")
     print(f"HISTORY")
