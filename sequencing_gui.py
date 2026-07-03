@@ -82,6 +82,7 @@ class SequencingGUI(QMainWindow):
         self.esd_traces = None
         self.esd_data = None
         self.current_well = None
+        self._saved_lims = {}
         self._setup_ui()
         self._populate_wells()
 
@@ -439,6 +440,10 @@ class SequencingGUI(QMainWindow):
                     bbox=dict(facecolor='white', alpha=0.7, pad=1))
 
         self.fig.subplots_adjust(hspace=0.08, left=0.05, right=0.98, top=0.97, bottom=0.05)
+
+        # Restore zoom state from before the redraw
+        self._restore_limits([ax1, ax2, ax3])
+
         self.canvas.draw()
 
     def _save_data(self):
@@ -570,6 +575,19 @@ class SequencingGUI(QMainWindow):
             else:
                 q_al.append('-'); r_al.append(r[j-1]); j -= 1
         return ''.join(reversed(q_al)), ''.join(reversed(r_al))
+
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_R:
+            self._reset_view()
+        elif event.key() == Qt.Key_L:
+            self._load_data()
+
+    def _reset_view(self):
+        self._saved_lims = {}
+        for ax in self.fig.axes:
+            ax.autoscale(True)
+        self.canvas.draw()
 
 
 if __name__ == '__main__':
