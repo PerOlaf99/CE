@@ -221,6 +221,9 @@ class SequencingGUI(QMainWindow):
         self.ml_btn = QPushButton('Run ML basecalling')
         self.ml_btn.clicked.connect(self._run_ml)
         bottom.addWidget(self.ml_btn)
+        self.reset_btn = QPushButton('Reset view')
+        self.reset_btn.clicked.connect(self._reset_view)
+        bottom.addWidget(self.reset_btn)
         self.progress = QProgressBar()
         self.progress.setMaximumWidth(200)
         self.progress.setVisible(False)
@@ -366,9 +369,10 @@ class SequencingGUI(QMainWindow):
         raw, bl, corr, sm, separated, mix = result
 
         self.fig.clear()
-        ax1 = self.fig.add_subplot(3, 1, 1)
-        ax2 = self.fig.add_subplot(3, 1, 2, sharex=ax1)
-        ax3 = self.fig.add_subplot(3, 1, 3, sharex=ax1)
+        ax1 = self.fig.add_subplot(4, 1, 1)
+        ax2 = self.fig.add_subplot(4, 1, 2, sharex=ax1)
+        ax3 = self.fig.add_subplot(4, 1, 3, sharex=ax1)
+        ax4 = self.fig.add_subplot(4, 1, 4, sharex=ax1)
         for ch in range(4):
             ax1.plot(self.x_rsd, raw[:, ch], color=CHAN_COLORS[ch], linewidth=0.3, alpha=0.6)
             ax1.plot(self.x_rsd, bl[:, ch], color=CHAN_COLORS[ch], linewidth=0.5,
