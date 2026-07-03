@@ -405,15 +405,16 @@ class SequencingGUI(QMainWindow):
                 esd_traces[i] = ch
             except Exception:
                 esd_traces[i] = 0.0
-        # Remove isolated spike records (metadata leakage) by clipping any
-        # record where a channel exceeds the 99th-percentile of max-per-record.
-        # This keeps the 0-1 peak range fully visible.
+        # Clip spike records (metadata leakage): find the first record where
+        # any channel exceeds 5, use the preceding clean region's P99.9 as cap.
         max_per_rec = esd_traces.max(axis=1)
-        limit = np.percentile(max_per_rec, 99)
-        if 1 < limit < 500:
-            spike_mask = max_per_rec > limit
-            for ch in range(4):
-                esd_traces[spike_mask, ch] = np.clip(esd_traces[spike_mask, ch], 0, limit)
+        spikes = np.where(max_per_rec > 5)[0]
+        if len(spikes) > 0:
+            clean_end = spikes[0]
+            clean_max = max_per_rec[:clean_end]
+            limit = float(np.percentile(clean_max, 99.9))
+            if 0 < limit < 1000:
+                esd_traces = np.clip(esd_traces, 0, limit)
         # Trim trailing all-zero region
         non_zero = np.any(esd_traces > 0, axis=1)
         if non_zero.any():
