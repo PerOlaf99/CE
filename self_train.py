@@ -55,14 +55,65 @@ def extract_windows(sep, positions):
     return np.array(windows, dtype=np.float32), np.array(valid)
 
 
-def find_peaks_from_trace(sep_raw, height=30, distance=3, prominence=15):
-    """Detect peaks on raw (non-normalized) separated traces, per-channel."""
-    all_peaks = set()
-    for c in range(4):
-        peaks, _ = find_peaks(sep_raw[c], height=height, distance=distance, prominence=prominence)
-        for p in peaks:
-            all_peaks.add(int(p))
-    return sorted(all_peaks)
+def scan_classify(rf, sep_n, threshold=0.90, stride=1):
+    """Use RF as sliding-window classifier: predict at every scan position,
+    keep high-confidence predictions, merge nearby."""
+    n = sep_n.shape[1]
+    windows = []
+    positions = []
+    for p in range(WINDOW, n - WINDOW, stride):
+        windows.append(sep_n[:, p - WINDOW:p + WINDOW + 1].T)
+        positions.append(p)
+    if not windows:
+        return np.array([]), np.array([], dtype=int), np.array([])
+    X = np.array(windows, dtype=np.float32).reshape(-1, (WINDOW*2+1)*4)
+    probs = rf.predict_proba(X)
+    max_p = probs.max(axis=1)
+    preds = probs.argmax(axis=1)
+    confident = max_p >= threshold
+    if confident.sum() == 0:
+        return np.array([]), np.array([], dtype=int), np.array([])
+    # Merge nearby predictions (NMS)
+    kept_pos, kept_pred, kept_conf = [], [], []
+    order = np.argsort(-max_p[confident])  # highest confidence first
+    cpos = np.array(positions)[confident]
+    cpred = preds[confident]
+    cconf = max_p[confident]
+    used = np.zeros(len(cpos), dtype=bool)
+    for i in order:
+        if used[i]: continue
+        # Mark all within nms_distance as used
+        nms = 3
+        cluster = np.abs(cpos - cpos[i]) <= nms
+        used[cluster] = True
+        kept_pos.append(cpos[i])
+        kept_pred.append(cpred[i])
+        kept_conf.append(cconf[i])
+    return (np.array(kept_pos), np.array(kept_pred), np.array(kept_conf))
+
+
+def pseudo_label_well(rf, well, threshold=0.95):
+    """Generate pseudo-labels for one well using scanning RF classifier."""
+    try:
+        sep = load_separate(well)
+    except Exception:
+        return None
+    sep_n = per_well_zscore_trace(sep)
+    positions, preds, confs = scan_classify(rf, sep_n, threshold=threshold, stride=1)
+    if len(positions) < 5:
+        return None
+    windows, valid = extract_windows(sep_n, positions)
+    if len(windows) == 0:
+        return None
+    return {
+        'X': windows.reshape(len(windows), -1),
+        'y': preds,
+        'positions': positions,
+        'confidence': confs,
+        'well': well,
+        'total_peaks': len(positions),
+        'confident_count': len(positions),
+    }
 
 
 def load_esd_labels(wells):
