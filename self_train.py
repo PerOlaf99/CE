@@ -126,7 +126,7 @@ def pseudo_label_well(rf, well, threshold=0.95):
     except Exception:
         return None
     sep_n = per_well_zscore_trace(sep)
-    peak_positions = find_peaks_from_trace(sep_n)
+    peak_positions = find_peaks_from_trace(sep)
     windows, valid = extract_windows(sep_n, peak_positions)
     if len(windows) == 0:
         return None
@@ -159,9 +159,7 @@ def evaluate_well(model, well):
         esd = parse_esd(os.path.join(BASE_DIR, ESD_DIR, f"{well}.esd"))
     except Exception:
         return 0, 0
-    positions = esd.get('peak_positions')
-    if positions is None:
-        positions = esd.get('bases_positions')
+    positions = esd['peak_positions']
     seq = esd.get('sequence','')
     if not seq or positions is None:
         return 0, 0
@@ -247,7 +245,7 @@ def self_train_loop(initial_labeled_wells, eval_wells, n_iters=3, threshold=0.95
             try:
                 sep = load_separate(well)
                 sep_n = per_well_zscore_trace(sep)
-                peaks = find_peaks_from_trace(sep_n)
+                peaks = find_peaks_from_trace(sep)
             except Exception:
                 continue
             windows, valid = extract_windows(sep_n, peaks)
