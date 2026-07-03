@@ -383,17 +383,21 @@ class SequencingGUI(QMainWindow):
             for ch in range(4):
                 bl[:, ch] = median_filter(raw[:, ch], size=bw, mode='reflect')
         elif bl_method == 'ALS':
+            from scipy import sparse
+            from scipy.sparse.linalg import spsolve
             lam = bw
             p = 0.005
             n = len(raw)
-            D = np.diff(np.eye(n), 2)
+            e = np.ones(n)
+            D2 = sparse.diags([e, -2*e, e], [0, 1, 2], shape=(n-2, n))
+            A = lam * D2.T @ D2
             for ch in range(4):
-                W = np.eye(n)
-                z = raw[:, ch].copy()
+                y = raw[:, ch].astype(np.float64)
+                w = np.ones(n)
                 for _ in range(10):
-                    z = np.linalg.solve(W + lam * D.T @ D, W @ raw[:, ch])
-                    w = p * (raw[:, ch] > z) + (1 - p) * (raw[:, ch] <= z)
-                    np.fill_diagonal(W, w)
+                    W = sparse.diags(w, 0)
+                    z = spsolve(W + A, w * y)
+                    w = p * (y > z) + (1 - p) * (y <= z)
                 bl[:, ch] = z
         corr = np.clip(raw - bl, 0, None)
 
