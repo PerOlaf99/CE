@@ -22,8 +22,9 @@ ESD_DIR = "MB1000_M13_DT_Cp312_MD1"
 WINDOW = 15
 BASE_MAP = {'A':0,'C':1,'G':2,'T':3,'N':4}
 INV_MAP = {0:'A',1:'C',2:'G',3:'T'}
-RF_PARAMS = dict(n_estimators=500, max_depth=12, class_weight='balanced',
+RF_PARAMS = dict(n_estimators=200, max_depth=12, class_weight='balanced',
                  n_jobs=-1, random_state=42)
+SCAN_STRIDE = 2
 
 
 def load_separate(well):
@@ -269,9 +270,6 @@ def self_train_loop(initial_labeled_wells, eval_wells, n_iters=3, threshold=0.95
             pl = pseudo_label_well(rf, well, threshold=threshold)
             if pl is not None:
                 new_pseudo.append(pl)
-                if it == 0:
-                    n_pos = pl['confident_count']
-                    print(f"  {well}: {pl['total_peaks']} peaks, {n_pos} confident (≥{threshold})")
 
         total_pseudo = sum(p['confidence'].shape[0] for p in new_pseudo)
         print(f"  Total pseudo-labels added: {total_pseudo}")
