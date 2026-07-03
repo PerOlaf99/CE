@@ -205,7 +205,7 @@ class SequencingGUI(QMainWindow):
         sliders_l.addWidget(mxg)
 
         # -- 3 plots --
-        self.fig = Figure(figsize=(14, 9), dpi=100)
+        self.fig = Figure(figsize=(14, 11), dpi=100)
         self.fig.subplots_adjust(hspace=0.08, left=0.05, right=0.98, top=0.97, bottom=0.05)
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
@@ -420,6 +420,31 @@ class SequencingGUI(QMainWindow):
                          bbox=dict(boxstyle='round,pad=0.02', facecolor='white',
                                    alpha=0.6, edgecolor=color))
 
+        # Plot 4: ESD traces with peaks
+        for ch in range(4):
+            ax4.plot(self.x_esd, self.esd_traces[:, ch], color=CHAN_COLORS[ch], linewidth=0.5)
+        ax4.set_ylabel('ESD traces', fontsize=8)
+        ax4.set_xlabel('Scan / Record index', fontsize=8)
+        ax4.tick_params(labelsize=7)
+
+        if peaks is not None and seq:
+            n_esd_recs = len(self.esd_traces)
+            for p, base in zip(peaks, seq):
+                p = int(p)
+                if p >= n_esd_recs:
+                    continue
+                trace = self.esd_traces[p]
+                dom_ch = np.argmax(trace) if np.any(trace > 0) else -1
+                if dom_ch < 0:
+                    continue
+                dom_base = BASE_LETTERS[dom_ch]
+                color = 'black' if base == dom_base else 'red'
+                ax4.axvline(x=p, color='gray', alpha=0.12, linewidth=0.3)
+                ax4.text(p, 0.95, base, fontsize=4, ha='center', va='top',
+                         color=color, clip_on=True,
+                         bbox=dict(boxstyle='round,pad=0.02', facecolor='white',
+                                   alpha=0.6, edgecolor=color))
+
         # Show matrix info
         cond = np.linalg.cond(mix)
         ax3.text(0.99, 0.01, f'cond={cond:.2f}', transform=ax3.transAxes,
@@ -446,7 +471,7 @@ class SequencingGUI(QMainWindow):
         self.fig.subplots_adjust(hspace=0.08, left=0.05, right=0.98, top=0.97, bottom=0.05)
 
         # Restore zoom state from before the redraw
-        self._restore_limits([ax1, ax2, ax3])
+        self._restore_limits([ax1, ax2, ax3, ax4])
 
         self.canvas.draw()
 
