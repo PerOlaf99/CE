@@ -129,6 +129,7 @@ class SequencingGUI(QMainWindow):
         self.bl_spin.setRange(20, 1000)
         self.bl_spin.setValue(200)
         self.bl_spin.setSingleStep(10)
+        self.bl_spin.setMinimumWidth(70)
         self._link_slider_spinbox(self.bl_slider, self.bl_spin)
         hl.addWidget(self.bl_slider)
         hl.addWidget(self.bl_spin)
@@ -159,6 +160,7 @@ class SequencingGUI(QMainWindow):
         self.sm_win_spin.setRange(3, 51)
         self.sm_win_spin.setValue(7)
         self.sm_win_spin.setSingleStep(2)
+        self.sm_win_spin.setMinimumWidth(60)
         self._link_slider_spinbox(self.sm_win_slider, self.sm_win_spin)
         hl1.addWidget(self.sm_win_slider)
         hl1.addWidget(self.sm_win_spin)
@@ -173,6 +175,7 @@ class SequencingGUI(QMainWindow):
         self.sm_ord_spin = QSpinBox()
         self.sm_ord_spin.setRange(1, 20)
         self.sm_ord_spin.setValue(2)
+        self.sm_ord_spin.setMinimumWidth(60)
         self._link_slider_spinbox(self.sm_ord_slider, self.sm_ord_spin)
         hl2.addWidget(self.sm_ord_slider)
         hl2.addWidget(self.sm_ord_spin)
@@ -432,16 +435,22 @@ class SequencingGUI(QMainWindow):
         ax2.set_ylabel('Corrected + smoothed', fontsize=8)
         ax2.tick_params(labelbottom=False, labelsize=7)
 
-        # Plot 3: Separated vs ESD
+        # Plot 3: Separated vs ESD (ESD rescaled per-channel for shape comparison)
         for ch in range(4):
             ax3.plot(self.x_rsd, separated[:, ch], color=CHAN_COLORS[ch], linewidth=0.5,
                      label=f'Sep {BASE_LETTERS[ch]}')
+        # Scale ESD traces to match separated range per channel
+        esd_plot = self.esd_traces.copy()
         for ch in range(4):
-            ax3.plot(self.x_esd, self.esd_traces[:, ch], color=CHAN_COLORS[ch], linewidth=0.3,
+            s_max = separated[:, ch].max()
+            e_max = esd_plot[:, ch].max()
+            if e_max > 0 and s_max > 0:
+                esd_plot[:, ch] *= s_max / e_max
+        for ch in range(4):
+            ax3.plot(self.x_esd, esd_plot[:, ch], color=CHAN_COLORS[ch], linewidth=0.3,
                      linestyle=':', alpha=0.5)
-        ax3.set_ylabel('Separated + ESD (dotted)', fontsize=8)
-        ax3.set_xlabel('Scan / Record index', fontsize=8)
-        ax3.tick_params(labelsize=7)
+        ax3.set_ylabel('Separated (+ ESD scaled)', fontsize=8)
+        ax3.tick_params(labelbottom=False, labelsize=7)
 
         # Add base labels from ESD
         peaks = self.esd_data.get('peak_positions')
