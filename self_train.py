@@ -154,7 +154,7 @@ def pseudo_label_well(rf, well, threshold=0.95):
     except Exception:
         return None
     sep_n = per_well_zscore_trace(sep)
-    positions, preds, confs = scan_classify(rf, sep_n, threshold=threshold, stride=1)
+    positions, preds, confs = scan_classify(rf, sep_n, threshold=threshold, stride=SCAN_STRIDE)
     if len(positions) < 5:
         return None
     windows, valid = extract_windows(sep_n, positions)
@@ -265,7 +265,7 @@ def self_train_loop(initial_labeled_wells, eval_wells, n_iters=3, threshold=0.95
             try:
                 sep = load_separate(well)
                 sep_n = per_well_zscore_trace(sep)
-                positions, preds, _ = scan_classify(rf, sep_n, threshold=0.5, stride=1)
+                positions, preds, _ = scan_classify(rf, sep_n, threshold=0.5, stride=SCAN_STRIDE)
             except Exception:
                 continue
             if len(positions) < 10:
