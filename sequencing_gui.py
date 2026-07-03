@@ -165,7 +165,8 @@ class SequencingGUI(QMainWindow):
         smg_g.addLayout(hl1)
 
         hl2 = QHBoxLayout()
-        hl2.addWidget(QLabel('Order/Sigma:'))
+        self.sm_param2_label = QLabel('Order:')
+        hl2.addWidget(self.sm_param2_label)
         self.sm_ord_slider = QSlider(Qt.Horizontal)
         self.sm_ord_slider.setRange(1, 20)
         self.sm_ord_slider.setValue(2)
