@@ -331,20 +331,43 @@ class SequencingGUI(QMainWindow):
 
         return raw, bl, corr, sm, separated, mix
 
+    def _save_limits(self):
+        """Save current axis limits before redraw."""
+        self._saved_lims = {}
+        for i, ax in enumerate(self.fig.axes):
+            self._saved_lims[i] = {
+                'xlim': ax.get_xlim(),
+                'ylim': ax.get_ylim(),
+                'x_autoscale': ax.get_autoscalex_on(),
+                'y_autoscale': ax.get_autoscaley_on(),
+            }
+
+    def _restore_limits(self, axes):
+        """Restore saved axis limits after redraw."""
+        for i, ax in enumerate(axes):
+            if i in self._saved_lims:
+                lims = self._saved_lims[i]
+                if not lims['x_autoscale']:
+                    ax.set_xlim(lims['xlim'])
+                if not lims['y_autoscale']:
+                    ax.set_ylim(lims['ylim'])
+
     def _update_plot(self):
         if self.rsd_raw is None or self.esd_traces is None:
             return
         result = self._process()
         if result is None:
             return
+
+        # Save current zoom state before clearing
+        self._save_limits()
+
         raw, bl, corr, sm, separated, mix = result
 
         self.fig.clear()
         ax1 = self.fig.add_subplot(3, 1, 1)
         ax2 = self.fig.add_subplot(3, 1, 2, sharex=ax1)
         ax3 = self.fig.add_subplot(3, 1, 3, sharex=ax1)
-
-        # Plot 1: Raw + baseline
         for ch in range(4):
             ax1.plot(self.x_rsd, raw[:, ch], color=CHAN_COLORS[ch], linewidth=0.3, alpha=0.6)
             ax1.plot(self.x_rsd, bl[:, ch], color=CHAN_COLORS[ch], linewidth=0.5,
@@ -489,9 +512,10 @@ class SequencingGUI(QMainWindow):
 
         # Clamp positions to valid range
         n_sep = len(separated)
-        valid = (positions >= 0) & (positions < n_sep)
+        valid = np.where((positions >= 0) & (positions < n_sep))[0]
         positions = positions[valid]
-        seq = ''.join(np.array(list(seq))[valid.numpy() if hasattr(valid, 'numpy') else valid])
+        seq_list = list(seq)
+        seq = ''.join(seq_list[i] for i in valid if i < len(seq_list))
 
         # Argmax basecalling on separated data
         n = min(len(seq), len(positions))
