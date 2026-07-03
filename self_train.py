@@ -93,30 +93,6 @@ def scan_classify(rf, sep_n, threshold=0.90, stride=1):
     return (np.array(kept_pos), np.array(kept_pred), np.array(kept_conf))
 
 
-def pseudo_label_well(rf, well, threshold=0.95):
-    """Generate pseudo-labels for one well using scanning RF classifier."""
-    try:
-        sep = load_separate(well)
-    except Exception:
-        return None
-    sep_n = per_well_zscore_trace(sep)
-    positions, preds, confs = scan_classify(rf, sep_n, threshold=threshold, stride=1)
-    if len(positions) < 5:
-        return None
-    windows, valid = extract_windows(sep_n, positions)
-    if len(windows) == 0:
-        return None
-    return {
-        'X': windows.reshape(len(windows), -1),
-        'y': preds,
-        'positions': positions,
-        'confidence': confs,
-        'well': well,
-        'total_peaks': len(positions),
-        'confident_count': len(positions),
-    }
-
-
 def load_esd_labels(wells):
     """Load ESD-labeled training data for given wells."""
     X_all, y_all, w_all = [], [], []
