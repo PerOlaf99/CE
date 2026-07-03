@@ -282,6 +282,13 @@ class SequencingGUI(QMainWindow):
             {'Savitzky-Golay': 'Order:', 'Gaussian': 'Sigma:', 'Moving Avg': 'Window2:'}[method])
         self._schedule_update()
 
+    def _on_baseline_method_changed(self, method):
+        is_rolling = method.startswith('Rolling')
+        self.bl_param_label.setText('Window:' if is_rolling else 'Lambda:')
+        self.bl_spin.setRange(20, 100000 if not is_rolling else 1000)
+        self.bl_slider.setRange(20, 100000 if not is_rolling else 1000)
+        self._schedule_update()
+
     def _set_matrix(self, vals):
         for sl, sp, v in zip(self.mx_sliders, self.mx_spins, vals):
             sl.blockSignals(True)
@@ -359,8 +366,27 @@ class SequencingGUI(QMainWindow):
         # Baseline
         bw = self.bl_spin.value()
         bl = np.zeros_like(raw)
-        for ch in range(4):
-            bl[:, ch] = minimum_filter1d(raw[:, ch], size=bw, mode='reflect')
+        bl_method = self.baseline_combo.currentText()
+        if bl_method == 'Rolling Minimum':
+            for ch in range(4):
+                bl[:, ch] = minimum_filter1d(raw[:, ch], size=bw, mode='reflect')
+        elif bl_method == 'Rolling Median':
+            from scipy.ndimage import median_filter
+            for ch in range(4):
+                bl[:, ch] = median_filter(raw[:, ch], size=bw, mode='reflect')
+        elif bl_method == 'ALS':
+            lam = bw
+            p = 0.005
+            n = len(raw)
+            D = np.diff(np.eye(n), 2)
+            for ch in range(4):
+                W = np.eye(n)
+                z = raw[:, ch].copy()
+                for _ in range(10):
+                    z = np.linalg.solve(W + lam * D.T @ D, W @ raw[:, ch])
+                    w = p * (raw[:, ch] > z) + (1 - p) * (raw[:, ch] <= z)
+                    np.fill_diagonal(W, w)
+                bl[:, ch] = z
         corr = np.clip(raw - bl, 0, None)
 
         # Smooth
