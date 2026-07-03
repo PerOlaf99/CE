@@ -396,15 +396,24 @@ class SequencingGUI(QMainWindow):
         with open(path, 'rb') as f:
             raw = f.read()
         n_records = len(raw) // 20
-        self.esd_traces = np.zeros((n_records, 4), dtype=np.float64)
+        esd_traces = np.zeros((n_records, 4), dtype=np.float64)
         for i in range(n_records):
             try:
                 ch = struct.unpack('<ffff', raw[i*20+4:(i+1)*20])
                 ch = tuple(0.0 if np.isnan(c) or np.isinf(c) or abs(c) > 1000
                            else max(0.0, c) for c in ch)
-                self.esd_traces[i] = ch
+                esd_traces[i] = ch
             except Exception:
-                self.esd_traces[i] = 0.0
+                esd_traces[i] = 0.0
+        # Trim trailing metadata records beyond last peak + margin
+        peaks = self.esd_data.get('peak_positions', [])
+        if peaks:
+            last_peak = int(max(peaks))
+            margin = 50
+            end = min(len(esd_traces), last_peak + margin)
+            self.esd_traces = esd_traces[:end]
+        else:
+            self.esd_traces = esd_traces
 
     def _process(self):
         if self.rsd_raw is None:
