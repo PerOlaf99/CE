@@ -375,12 +375,15 @@ class SequencingGUI(QMainWindow):
         peaks = self.esd_data.get('peak_positions')
         seq = self.esd_data.get('sequence', '')
         if peaks is not None and seq:
+            n_esd_recs = len(self.esd_traces)
             for p, base in zip(peaks, seq):
                 p = int(p)
-                if p >= len(self.esd_traces):
+                if p >= n_esd_recs:
                     continue
                 trace = self.esd_traces[p]
-                dom_ch = np.argmax(trace)
+                dom_ch = np.argmax(trace) if np.any(trace > 0) else -1
+                if dom_ch < 0:
+                    continue
                 dom_base = BASE_LETTERS[dom_ch]
                 color = 'black' if base == dom_base else 'red'
                 ax3.axvline(x=p, color='gray', alpha=0.08, linewidth=0.3)
@@ -479,6 +482,16 @@ class SequencingGUI(QMainWindow):
             self.status.setText('No ESD peaks to evaluate')
             self.progress.setVisible(False)
             return
+
+        # Clamp positions to valid range
+        n_sep = len(separated)
+        valid_mask = (positions >= 0) & (positions < n_sep)
+
+        # Clamp positions to valid range
+        n_sep = len(separated)
+        valid = (positions >= 0) & (positions < n_sep)
+        positions = positions[valid]
+        seq = ''.join(np.array(list(seq))[valid.numpy() if hasattr(valid, 'numpy') else valid])
 
         # Argmax basecalling on separated data
         n = min(len(seq), len(positions))
