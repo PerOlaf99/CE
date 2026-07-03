@@ -171,31 +171,26 @@ def load_esd_labels_from_npz(npz_path):
 
 
 def pseudo_label_well(rf, well, threshold=0.95):
-    """Generate pseudo-labels for one well (no ESD)."""
+    """Generate pseudo-labels for one well using scanning RF classifier."""
     try:
         sep = load_separate(well)
     except Exception:
         return None
     sep_n = per_well_zscore_trace(sep)
-    peak_positions = find_peaks_from_trace(sep)
-    windows, valid = extract_windows(sep_n, peak_positions)
+    positions, preds, confs = scan_classify(rf, sep_n, threshold=threshold, stride=1)
+    if len(positions) < 5:
+        return None
+    windows, valid = extract_windows(sep_n, positions)
     if len(windows) == 0:
         return None
-    X_flat = windows.reshape(len(windows), -1)
-    probs = rf.predict_proba(X_flat)
-    max_probs = probs.max(axis=1)
-    preds = probs.argmax(axis=1)
-    confident = max_probs >= threshold
-    if confident.sum() < 5:
-        return None
     return {
-        'X': X_flat[confident],
-        'y': preds[confident],
-        'positions': valid[confident],
-        'confidence': max_probs[confident],
+        'X': windows.reshape(len(windows), -1),
+        'y': preds,
+        'positions': positions,
+        'confidence': confs,
         'well': well,
-        'total_peaks': len(valid),
-        'confident_count': confident.sum(),
+        'total_peaks': len(positions),
+        'confident_count': len(positions),
     }
 
 
@@ -289,21 +284,19 @@ def self_train_loop(initial_labeled_wells, eval_wells, n_iters=3, threshold=0.95
             y_base = np.concatenate([y_base, y_pseudo], axis=0)
             print(f"  Expanded training set: {len(y_base)} samples")
 
-        # Self-training evaluation: full pipeline (peak detect + classify) on test wells
-        print(f"  Full pipeline (peak detect + RF classify) on test wells...")
+        # Self-training evaluation: full pipeline (scan+classify) on test wells
+        print(f"  Full pipeline (scan RF + classify) on test wells...")
         pipe_ids = []
         for well in eval_wells:
             try:
                 sep = load_separate(well)
                 sep_n = per_well_zscore_trace(sep)
-                peaks = find_peaks_from_trace(sep)
+                positions, preds, _ = scan_classify(rf, sep_n, threshold=0.5, stride=1)
             except Exception:
                 continue
-            windows, valid = extract_windows(sep_n, peaks)
-            if len(windows) == 0:
+            if len(positions) < 10:
                 continue
-            pred = rf.predict(windows.reshape(len(windows), -1))
-            called = ''.join(INV_MAP.get(int(p),'N') for p in pred)
+            called = ''.join(INV_MAP.get(int(p),'N') for p in preds)
             res = align_to_m13(called)
             pipe_ids.append(res['identity'] if res else 0)
 
