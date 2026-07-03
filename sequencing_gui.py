@@ -190,11 +190,15 @@ class SequencingGUI(QMainWindow):
             sl = QSlider(Qt.Horizontal)
             sl.setRange(0, 100)
             sl.setValue(85)
-            sl.setTickPosition(QSlider.TicksBelow)
+            sl.setTickPosition(QSlider.TicksAbove)
+            sl.setTickInterval(10)
+            sl.setMinimumHeight(30)
             sp = QSpinBox()
             sp.setRange(0, 100)
             sp.setValue(85)
             sp.setSuffix('%')
+            sp.setMinimumWidth(70)
+            sp.setStyleSheet('QSpinBox { font-size: 11pt; font-weight: bold; }')
             self._link_slider_spinbox(sl, sp)
             mxg_g.addWidget(sl, i, 1)
             mxg_g.addWidget(sp, i, 2)
@@ -262,12 +266,8 @@ class SequencingGUI(QMainWindow):
 
     def _on_smooth_method_changed(self, method):
         self._smooth_mode = method
-        label = {'Savitzky-Golay': 'Order:', 'Gaussian': 'Sigma:', 'Moving Avg': 'Window2:'}[method]
-        # Find and update the second parameter label
-        for i in range(self.sm_ord_slider.parent().layout().count() - 1):
-            w = self.sm_ord_slider.parent().layout().itemAt(i)
-            if w and w.widget() and isinstance(w.widget(), QLabel) and ':' in w.widget().text():
-                w.widget().setText(label)
+        self.sm_param2_label.setText(
+            {'Savitzky-Golay': 'Order:', 'Gaussian': 'Sigma:', 'Moving Avg': 'Window2:'}[method])
         self._schedule_update()
 
     def _set_matrix(self, vals):
