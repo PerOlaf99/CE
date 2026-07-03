@@ -111,7 +111,7 @@ class SequencingGUI(QMainWindow):
 
         # -- Sliders panel --
         sliders_w = QWidget()
-        sliders_w.setMinimumHeight(200)
+        sliders_w.setMinimumHeight(260)
         sliders_l = QHBoxLayout(sliders_w)
         sliders_l.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(sliders_w)
@@ -186,6 +186,7 @@ class SequencingGUI(QMainWindow):
         # Matrix group: 4 diagonal sliders
         mxg = QGroupBox('Matrix (diagonal per base)')
         mxg_g = QGridLayout(mxg)
+        mxg_g.setVerticalSpacing(6)
         self.mx_sliders = []
         self.mx_spins = []
         for i, label in enumerate(['T (Ch0)', 'G (Ch1)', 'C (Ch2)', 'A (Ch3)']):
@@ -195,7 +196,7 @@ class SequencingGUI(QMainWindow):
             sl.setValue(85)
             sl.setTickPosition(QSlider.TicksAbove)
             sl.setTickInterval(10)
-            sl.setMinimumHeight(30)
+            sl.setMinimumHeight(36)
             sp = QSpinBox()
             sp.setRange(0, 100)
             sp.setValue(85)
