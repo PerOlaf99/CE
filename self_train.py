@@ -76,7 +76,9 @@ def load_esd_labels(wells):
         except Exception:
             continue
         seq = esd.get('sequence','')
-        positions = esd.get('peak_positions') or esd.get('bases_positions')
+        positions = esd.get('peak_positions')
+        if positions is None:
+            positions = esd.get('bases_positions')
         if not seq or positions is None:
             continue
         n = min(len(seq), len(positions))
