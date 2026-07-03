@@ -400,8 +400,8 @@ class SequencingGUI(QMainWindow):
         for i in range(n_records):
             try:
                 ch = struct.unpack('<ffff', raw[i*20+4:(i+1)*20])
-                # Filter extreme values (metadata leakage into trace data)
-                ch = tuple(0.0 if np.isnan(c) or np.isinf(c) or abs(c) > 1000 else c for c in ch)
+                ch = tuple(0.0 if np.isnan(c) or np.isinf(c) or abs(c) > 1000
+                           else max(0.0, c) for c in ch)
                 self.esd_traces[i] = ch
             except Exception:
                 self.esd_traces[i] = 0.0
