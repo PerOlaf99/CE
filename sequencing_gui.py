@@ -244,10 +244,40 @@ class SequencingGUI(QMainWindow):
         self._update_timer.setInterval(50)
         self._update_timer.timeout.connect(self._update_plot)
 
+    def _link_slider_spinbox(self, slider, spinbox):
+        """Bidirectional connection with blockSignals to prevent infinite loops."""
+        def on_slider(v):
+            spinbox.blockSignals(True)
+            spinbox.setValue(v)
+            spinbox.blockSignals(False)
+            self._schedule_update()
+        def on_spinbox(v):
+            slider.blockSignals(True)
+            slider.setValue(v)
+            slider.blockSignals(False)
+            self._schedule_update()
+        slider.valueChanged.connect(on_slider)
+        spinbox.valueChanged.connect(on_spinbox)
+
+    def _on_smooth_method_changed(self, method):
+        self._smooth_mode = method
+        label = {'Savitzky-Golay': 'Order:', 'Gaussian': 'Sigma:', 'Moving Avg': 'Window2:'}[method]
+        # Find and update the second parameter label
+        for i in range(self.sm_ord_slider.parent().layout().count() - 1):
+            w = self.sm_ord_slider.parent().layout().itemAt(i)
+            if w and w.widget() and isinstance(w.widget(), QLabel) and ':' in w.widget().text():
+                w.widget().setText(label)
+        self._schedule_update()
+
     def _set_matrix(self, vals):
         for sl, sp, v in zip(self.mx_sliders, self.mx_spins, vals):
+            sl.blockSignals(True)
+            sp.blockSignals(True)
             sl.setValue(v)
             sp.setValue(v)
+            sl.blockSignals(False)
+            sp.blockSignals(False)
+            self._schedule_update()
 
     def _schedule_update(self):
         self._update_timer.start()
@@ -323,12 +353,19 @@ class SequencingGUI(QMainWindow):
         # Smooth
         sw = self.sm_win_spin.value()
         so = self.sm_ord_spin.value()
-        if sw > so + 1 and sw % 2 == 1:
-            sm = corr.copy()
+        sm = corr.copy()
+        if self._smooth_mode == 'Savitzky-Golay':
+            if sw > so + 1 and sw % 2 == 1:
+                for ch in range(4):
+                    sm[:, ch] = savgol_filter(sm[:, ch], sw, so)
+        elif self._smooth_mode == 'Gaussian':
             for ch in range(4):
-                sm[:, ch] = savgol_filter(sm[:, ch], sw, so)
-        else:
-            sm = corr.copy()
+                sm[:, ch] = gaussian_filter1d(sm[:, ch], sigma=so, truncate=sw/so/2)
+        elif self._smooth_mode == 'Moving Avg':
+            if sw >= 3:
+                kernel = np.ones(sw) / sw
+                for ch in range(4):
+                    sm[:, ch] = np.convolve(sm[:, ch], kernel, mode='same')
 
         # Matrix separation
         diag = np.array([s.value() / 100.0 for s in self.mx_sliders])
@@ -545,10 +582,6 @@ class SequencingGUI(QMainWindow):
             self.status.setText('No ESD peaks to evaluate')
             self.progress.setVisible(False)
             return
-
-        # Clamp positions to valid range
-        n_sep = len(separated)
-        valid_mask = (positions >= 0) & (positions < n_sep)
 
         # Clamp positions to valid range
         n_sep = len(separated)
