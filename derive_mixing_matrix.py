@@ -183,6 +183,16 @@ def evaluate_matrix(mix, label="matrix"):
     return cond
 
 
+def eval_vs_m13(called_seq):
+    """Evaluate called sequence vs M13 using pure-Python NW alignment."""
+    q = ''.join(c for c in called_seq if c in 'ACGT')
+    if len(q) < 20:
+        return 0
+    q_al, r_al = _nw_align_with_strings(q, M13_REFERENCE)
+    matches = sum(1 for a, b in zip(q_al, r_al) if a == b)
+    return matches / len(q_al) * 100 if q_al else 0
+
+
 def test_matrix_on_well(well, mix, bl_window=200, smooth_win=7, smooth_order=2):
     """Apply matrix to a well, separate, and evaluate base call."""
     rsd_path = os.path.join(BASE_DIR, f"{well}.rsd")
@@ -208,16 +218,8 @@ def test_matrix_on_well(well, mix, bl_window=200, smooth_win=7, smooth_order=2):
         return None
 
     n = min(len(seq), len(positions))
-    called = []
-    for i in range(n):
-        p = int(positions[i])
-        if 0 <= p < len(separated):
-            ch = np.argmax(separated[p])
-            called.append('ATGC'[ch])  # Channel 3->A, 2->T, 1->G, 0->C... wait
-            # Ch0->T, Ch1->G, Ch2->C, Ch3->A
-    # Actually:
-    called = []
     chem_map = {0: 'T', 1: 'G', 2: 'C', 3: 'A'}
+    called = []
     for i in range(n):
         p = int(positions[i])
         if 0 <= p < len(separated):
@@ -230,19 +232,13 @@ def test_matrix_on_well(well, mix, bl_window=200, smooth_win=7, smooth_order=2):
     seq = seq[:n]
     matches = sum(1 for a, b in zip(called, seq) if a == b)
     pct = matches / n * 100 if n > 0 else 0
-
-    # Also evaluate against M13
-    align = align_to_reference(called)
-    if align:
-        m13_id = align['identity']
-    else:
-        m13_id = 0
+    m13_pct = eval_vs_m13(called)
 
     return {
         'well': well,
         'n_peaks': n,
         'vs_esd_pct': pct,
-        'vs_m13_pct': m13_id,
+        'vs_m13_pct': m13_pct,
         'matches_esd': matches,
         'calls': called,
     }
@@ -260,7 +256,7 @@ def main():
     print("\n--- Method A: ESD-called sequence (no M13 alignment) ---")
     for esd_key in ['Cp312', 'Cp1_530', 'M']:
         mix, profiles = derive_matrix_from_wells(wells, esd_key=esd_key,
-                                                   align_to_m13=False)
+                                                   use_m13=False)
         evaluate_matrix(mix, f"{esd_key} (called seq)")
         for base in 'ACGT':
             cnt = len(profiles[base])
@@ -270,7 +266,7 @@ def main():
     print("\n--- Method B: M13-aligned sequence ---")
     for esd_key in ['Cp312', 'Cp1_530', 'M']:
         mix, profiles = derive_matrix_from_wells(wells, esd_key=esd_key,
-                                                   align_to_m13=True)
+                                                   use_m13=True)
         evaluate_matrix(mix, f"{esd_key} (M13 aligned)")
         for base in 'ACGT':
             cnt = len(profiles[base])
@@ -280,26 +276,20 @@ def main():
     print("\n--- Method C: No smooth, no gain norm (M13 aligned, Cp312) ---")
     mix, profiles = derive_matrix_from_wells(wells, esd_key='Cp312',
                                                smooth_win=0, gain_norm=False,
-                                               align_to_m13=True)
+                                               use_m13=True)
     evaluate_matrix(mix, "Raw (no smooth/gain)")
 
     # Test 4: Different baseline window sizes
     print("\n--- Method D: Baseline window variations (Cp312, M13 aligned) ---")
     for bw in [100, 300, 500]:
         mix, profiles = derive_matrix_from_wells(wells, esd_key='Cp312',
-                                                   bl_window=bw, align_to_m13=True)
+                                                   bl_window=bw, use_m13=True)
         evaluate_matrix(mix, f"bl_window={bw}")
 
-    # Test 5: Use positions from the gain-normalized trace itself
-    # (find peaks per channel in RSD to avoid ESD position bias)
-    print("\n--- Method E: RSD peak-picked positions (Cp312 calls as labels) ---")
-    mix, profiles = derive_matrix_from_wells(wells, esd_key='Cp312',
-                                               align_to_m13=True)
-    evaluate_matrix(mix, "Best method")
-
     # Save the best matrix
-    mix_best, _ = derive_matrix_from_wells(wells, esd_key='Cp312',
-                                             align_to_m13=True)
+    print("\n--- Method E: Best method (Cp312, M13 aligned) ---")
+    mix_best, profiles = derive_matrix_from_wells(wells, esd_key='Cp312',
+                                                   use_m13=True)
     np.save('derived_mixing_matrix.npy', mix_best)
     print(f"\nSaved to derived_mixing_matrix.npy")
     with open('derived_mixing_matrix.json', 'w') as f:
