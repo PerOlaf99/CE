@@ -485,25 +485,20 @@ class SequencingGUI(QMainWindow):
         return raw, bl, corr, sm, separated, mix
 
     def _save_limits(self):
-        """Save current axis limits before redraw."""
         self._saved_lims = {}
         for i, ax in enumerate(self.fig.axes):
             self._saved_lims[i] = {
                 'xlim': ax.get_xlim(),
-                'ylim': ax.get_ylim(),
                 'x_autoscale': ax.get_autoscalex_on(),
-                'y_autoscale': ax.get_autoscaley_on(),
             }
 
     def _restore_limits(self, axes):
-        """Restore saved axis limits after redraw."""
         for i, ax in enumerate(axes):
             if i in self._saved_lims:
                 lims = self._saved_lims[i]
+                ax.autoscale(True, axis='y')
                 if not lims['x_autoscale']:
                     ax.set_xlim(lims['xlim'])
-                if not lims['y_autoscale']:
-                    ax.set_ylim(lims['ylim'])
 
     def _update_plot(self):
         if self.rsd_raw is None or self.esd_traces is None:
