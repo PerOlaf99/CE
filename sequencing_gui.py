@@ -405,13 +405,17 @@ class SequencingGUI(QMainWindow):
                 esd_traces[i] = ch
             except Exception:
                 esd_traces[i] = 0.0
-        # Trim trailing metadata records beyond last peak + margin
-        peaks = self.esd_data.get('peak_positions', [])
-        if peaks:
-            last_peak = int(max(peaks))
-            margin = 50
-            end = min(len(esd_traces), last_peak + margin)
-            self.esd_traces = esd_traces[:end]
+        # Clip extreme outliers per channel (99.9th percentile) so peaks are visible
+        for ch in range(4):
+            vals = esd_traces[:, ch]
+            clip = np.percentile(vals, 99.9)
+            if clip > 0 and vals.max() > clip * 2:
+                esd_traces[:, ch] = np.clip(vals, 0, clip)
+        # Trim trailing records where all channels are consistently zero
+        non_zero = np.any(esd_traces > 0, axis=1)
+        if non_zero.any():
+            last_nz = np.where(non_zero)[0][-1]
+            self.esd_traces = esd_traces[:last_nz + 50]
         else:
             self.esd_traces = esd_traces
 
