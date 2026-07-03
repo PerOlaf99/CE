@@ -329,7 +329,7 @@ def main():
 
     npz_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'training_data_separated', 'Cp312.npz')
-    history, model = self_train_loop(train_wells, eval_wells, n_iters=3, threshold=0.95,
+    history, model = self_train_loop(train_wells, eval_wells, n_iters=2, threshold=0.95,
                                      npz_path=npz_path if os.path.exists(npz_path) else None)
 
     print(f"\n{'='*60}")
