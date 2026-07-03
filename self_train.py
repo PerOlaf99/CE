@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Self-training RF basecaller: train on ESD labels, pseudo-label new wells, retrain.
+
+Strategy:
+  1. Train initial RF on ESD-labeled data (Cp312 peak positions + labels)
+  2. For unlabeled wells: peak detect → classify → filter high-confidence → pseudo-labels
+  3. Retrain RF on original + pseudo-labels
+  4. Iterate until matching Cp312 M13 accuracy
+"""
+import sys, os, time, json
+import numpy as np
+from scipy.signal import find_peaks
+from sklearn.ensemble import RandomForestClassifier
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from extract_training_data import parse_rsd, parse_esd
+from tracetuner_separation import trace_tuner_separate
+from simple_align import align_to_m13
+
+BASE_DIR = "/media/tv/78B0C7DE1FA7081C/electropherogram/MB1000_M13_DT"
+ESD_DIR = "MB1000_M13_DT_Cp312_MD1"
+WINDOW = 15
+BASE_MAP = {'A':0,'C':1,'G':2,'T':3,'N':4}
+INV_MAP = {0:'A',1:'C',2:'G',3:'T'}
+RF_PARAMS = dict(n_estimators=500, max_depth=12, class_weight='balanced',
+                 n_jobs=-1, random_state=42)
+
+
+def load_separate(well):
+    rsd_path = os.path.join(BASE_DIR, f"{well}.rsd")
+    df = parse_rsd(rsd_path)
+    ch = df[['Channel1','Channel2','Channel3','Channel4']].values.T.astype(np.float64)
+    return trace_tuner_separate(ch)
+
+
+def per_well_zscore_trace(sep):
+    r = sep.copy()
+    for c in range(4):
+        mu, sd = r[c].mean(), r[c].std()
+        if sd > 1e-8:
+            r[c] = (r[c] - mu) / sd
+    return r
+
+
+def extract_windows(sep, positions):
+    n = sep.shape[1]
+    windows, valid = [], []
+    for p in positions:
+        if p < WINDOW or p >= n - WINDOW:
+            continue
+        windows.append(sep[:, p - WINDOW:p + WINDOW + 1].T)
+        valid.append(p)
+    if not windows:
+        return np.array([]), np.array([], dtype=int)
+    return np.array(windows, dtype=np.float32), np.array(valid)
+
+
+def find_peaks_from_trace(sep_norm, height=30, distance=3, prominence=10):
+    signal = sep_norm.sum(axis=0)
+    peaks, _ = find_peaks(signal, height=height, distance=distance, prominence=prominence)
+    return peaks
+
+
+def load_esd_labels(wells):
+    """Load ESD-labeled training data for given wells."""
+    X_all, y_all, w_all = [], [], []
+    for well in wells:
+        sep, sep_n = None, None
+        try:
+            sep = load_separate(well)
+            sep_n = per_well_zscore_trace(sep)
+        except Exception:
+            continue
+        try:
+            esd = parse_esd(os.path.join(BASE_DIR, ESD_DIR, f"{well}.esd"))
+        except Exception:
+            continue
+        seq = esd.get('sequence','')
+        positions = esd.get('peak_positions') or esd.get('bases_positions')
+        if not seq or positions is None:
+            continue
+        n = min(len(seq), len(positions))
+        positions = positions[:n].astype(int)
+        seq = seq[:n]
+        X_w, pos_w = extract_windows(sep_n, positions)
+        y_w = np.array([BASE_MAP.get(b, 4) for b in seq])
+        keep = y_w != 4
+        X_all.append(X_w[keep])
+        y_all.append(y_w[keep])
+        w_all.append(np.full(keep.sum(), well))
+    if not X_all:
+        return None, None, None
+    return (np.concatenate(X_all, axis=0).reshape(-1, (WINDOW*2+1)*4),
+            np.concatenate(y_all, axis=0),
+            np.concatenate(w_all))
+
+
+def load_esd_labels_from_npz(npz_path):
+    """Load pre-separated ESD-labeled data from .npz."""
+    d = np.load(npz_path, allow_pickle=True)
+    X = d['X'].astype(np.float32)
+    y = d['y'].copy()
+    wells = d['wells']
+    keep = y != 4
+    X, y, wells = X[keep], y[keep], wells[keep]
+    for w in np.unique(wells):
+        mask = wells == w
+        for ch in range(4):
+            data = X[mask, :, ch]
+            mu, sd = data.mean(), data.std()
+            if sd > 1e-8:
+                X[mask, :, ch] = (data - mu) / sd
+    return X.reshape(X.shape[0], -1), y, wells
+
+
+def pseudo_label_well(rf, well, threshold=0.95):
+    """Generate pseudo-labels for one well (no ESD)."""
+    try:
+        sep = load_separate(well)
+    except Exception:
+        return None
+    sep_n = per_well_zscore_trace(sep)
+    peak_positions = find_peaks_from_trace(sep_n)
+    windows, valid = extract_windows(sep_n, peak_positions)
+    if len(windows) == 0:
+        return None
+    X_flat = windows.reshape(len(windows), -1)
+    probs = rf.predict_proba(X_flat)
+    max_probs = probs.max(axis=1)
+    preds = probs.argmax(axis=1)
+    confident = max_probs >= threshold
+    if confident.sum() < 5:
+        return None
+    return {
+        'X': X_flat[confident],
+        'y': preds[confident],
+        'positions': valid[confident],
+        'confidence': max_probs[confident],
+        'well': well,
+        'total_peaks': len(valid),
+        'confident_count': confident.sum(),
+    }
+
+
+def evaluate_well(model, well):
+    """M13 evaluation using ESD positions (for benchmarking)."""
+    try:
+        sep = load_separate(well)
+    except Exception:
+        return 0, 0
+    sep_n = per_well_zscore_trace(sep)
+    try:
+        esd = parse_esd(os.path.join(BASE_DIR, ESD_DIR, f"{well}.esd"))
+    except Exception:
+        return 0, 0
+    positions = esd.get('peak_positions') or esd.get('bases_positions')
+    seq = esd.get('sequence','')
+    if not seq or positions is None:
+        return 0, 0
+    n = min(len(seq), len(positions))
+    positions = positions[:n].astype(int)
+    seq = seq[:n]
+    windows, valid = extract_windows(sep_n, positions)
+    if len(windows) == 0:
+        return 0, 0
+    pred = model.predict(windows.reshape(len(windows), -1))
+    called = ''.join(INV_MAP.get(int(p),'N') for p in pred)
+    res = align_to_m13(called)
+
+    # Cp312 baseline
+    cp_seq = seq[:len(valid)]
+    cp_res = align_to_m13(cp_seq)
+    rf_id = res['identity'] if res else 0
+    cp_id = cp_res['identity'] if cp_res else 0
+    return rf_id, cp_id
+
+
+def self_train_loop(initial_labeled_wells, eval_wells, n_iters=3, threshold=0.95):
+    """Self-training loop. Returns history of iterations."""
+    history = []
+
+    train_wells = list(initial_labeled_wells)
+    X_base, y_base, w_base = load_esd_labels(train_wells)
+
+    for it in range(n_iters):
+        print(f"\n{'='*60}")
+        print(f"Iteration {it+1}/{n_iters}")
+        print(f"{'='*60}")
+        print(f"Training RF on {len(train_wells)} wells ({len(y_base)} samples)...")
+        t0 = time.time()
+        rf = RandomForestClassifier(**RF_PARAMS)
+        rf.fit(X_base, y_base)
+        print(f"  Trained in {time.time()-t0:.0f}s")
+
+        # Evaluate on test wells (ESD-supervised M13 identity)
+        rf_ids, cp_ids = [], []
+        for well in eval_wells:
+            rf_id, cp_id = evaluate_well(rf, well)
+            rf_ids.append(rf_id)
+            cp_ids.append(cp_id)
+
+        mean_rf = np.mean(rf_ids) if rf_ids else 0
+        mean_cp = np.mean(cp_ids) if cp_ids else 0
+        print(f"  Supervised M13: RF={mean_rf:.1f}%  Cp312={mean_cp:.1f}%")
+
+        # Pseudo-label: use training wells themselves (remove ESD, pretend unlabeled)
+        new_pseudo = []
+        for well in train_wells:
+            pl = pseudo_label_well(rf, well, threshold=threshold)
+            if pl is not None:
+                new_pseudo.append(pl)
+                if it == 0:
+                    n_pos = pl['confident_count']
+                    print(f"  {well}: {pl['total_peaks']} peaks, {n_pos} confident (≥{threshold})")
+
+        total_pseudo = sum(p['confidence'].shape[0] for p in new_pseudo)
+        print(f"  Total pseudo-labels added: {total_pseudo}")
+
+        # Expand training set with pseudo-labels
+        if new_pseudo:
+            X_pseudo = np.concatenate([p['X'] for p in new_pseudo], axis=0)
+            y_pseudo = np.concatenate([p['y'] for p in new_pseudo], axis=0)
+            X_base = np.concatenate([X_base, X_pseudo], axis=0)
+            y_base = np.concatenate([y_base, y_pseudo], axis=0)
+            print(f"  Expanded training set: {len(y_base)} samples")
+
+        # Self-training evaluation: full pipeline (peak detect + classify) on test wells
+        print(f"  Full pipeline (peak detect + RF classify) on test wells...")
+        pipe_ids = []
+        for well in eval_wells:
+            try:
+                sep = load_separate(well)
+                sep_n = per_well_zscore_trace(sep)
+                peaks = find_peaks_from_trace(sep_n)
+            except Exception:
+                continue
+            windows, valid = extract_windows(sep_n, peaks)
+            if len(windows) == 0:
+                continue
+            pred = rf.predict(windows.reshape(len(windows), -1))
+            called = ''.join(INV_MAP.get(int(p),'N') for p in pred)
+            res = align_to_m13(called)
+            pipe_ids.append(res['identity'] if res else 0)
+
+        mean_pipe = np.mean(pipe_ids) if pipe_ids else 0
+        print(f"  Full pipeline M13: {mean_pipe:.1f}% (on {len(eval_wells)} wells)")
+
+        history.append({
+            'iteration': it + 1,
+            'train_samples': len(y_base),
+            'pseudo_labels': total_pseudo,
+            'supervised_rf_mean': mean_rf,
+            'cp312_mean': mean_cp,
+            'full_pipeline_mean': mean_pipe,
+        })
+
+    return history, rf
+
+
+def main():
+    rows = [chr(ord('A')+i) for i in range(8)]
+    cols = [f'{i:02d}' for i in range(1, 13)]
+    all_wells = [f'{r}{c}' for r in rows for c in cols]
+
+    # Use first 80 wells for training, 16 for evaluation
+    train_wells = all_wells[:80]
+    eval_wells = all_wells[80:]
+
+    print(f"Train wells: {train_wells[0]}-{train_wells[-1]} ({len(train_wells)})")
+    print(f"Eval wells:  {eval_wells[0]}-{eval_wells[-1]} ({len(eval_wells)})")
+
+    history, model = self_train_loop(train_wells, eval_wells, n_iters=3, threshold=0.95)
+
+    print(f"\n{'='*60}")
+    print(f"HISTORY")
+    print(f"{'='*60}")
+    for h in history:
+        print(f"  Iter {h['iteration']}: supervised RF={h['supervised_rf_mean']:.1f}% "
+              f"Cp312={h['cp312_mean']:.1f}% "
+              f"pipeline={h['full_pipeline_mean']:.1f}% "
+              f"(+{h['pseudo_labels']} pseudo)")
+
+    import joblib
+    joblib.dump(model, '/tmp/self_trained_rf.pkl')
+    print(f"\nModel saved to /tmp/self_trained_rf.pkl")
+
+
+if __name__ == '__main__':
+    main()
