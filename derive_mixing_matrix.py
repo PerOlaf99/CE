@@ -16,7 +16,7 @@ from scipy.signal import savgol_filter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from extract_training_data import parse_rsd, parse_esd
-from m13_reference import M13_REFERENCE, align_to_reference
+from simple_align import M13_REFERENCE
 
 BASE_DIR = "/media/tv/78B0C7DE1FA7081C/electropherogram/MB1000_M13_DT"
 ESD_SUBDIRS = {
