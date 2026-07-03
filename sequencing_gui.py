@@ -93,7 +93,7 @@ class SequencingGUI(QMainWindow):
         layout = QVBoxLayout(main)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # -- Top bar: well selector + load --
+        # -- Top bar: well selector + load + toolbar --
         top = QHBoxLayout()
         layout.addLayout(top)
         top.addWidget(QLabel('Well:'))
@@ -107,6 +107,13 @@ class SequencingGUI(QMainWindow):
         top.addWidget(QLabel('  ESD variant:'))
         self.esd_combo = QComboBox()
         top.addWidget(self.esd_combo)
+
+        # -- Toolbar (moved up to save vertical space) --
+        self.fig = Figure(figsize=(14, 11), dpi=100)
+        self.fig.subplots_adjust(hspace=0.08, left=0.05, right=0.98, top=0.97, bottom=0.05)
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        top.addWidget(self.toolbar)
         top.addStretch()
 
         # -- Sliders panel --
@@ -423,11 +430,15 @@ class SequencingGUI(QMainWindow):
             for ch in range(4):
                 sm[:, ch] = median_filter(sm[:, ch], size=sw, mode='reflect')
         elif self._smooth_mode == 'Whittaker':
+            from scipy import sparse
+            from scipy.sparse.linalg import spsolve
             lam = sw
             n = len(sm)
-            D = np.diff(np.eye(n), 2)
+            e = np.ones(n)
+            D2 = sparse.diags([e, -2*e, e], [0, 1, 2], shape=(n-2, n))
+            A = sparse.eye(n) + lam * D2.T @ D2
             for ch in range(4):
-                sm[:, ch] = np.linalg.solve(np.eye(n) + lam * D.T @ D, sm[:, ch])
+                sm[:, ch] = spsolve(A, sm[:, ch])
 
         # Matrix separation
         diag = np.array([s.value() / 100.0 for s in self.mx_sliders])
