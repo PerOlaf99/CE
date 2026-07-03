@@ -205,8 +205,11 @@ class SequencingGUI(QMainWindow):
         mxg_g.setVerticalSpacing(6)
         self.mx_sliders = []
         self.mx_spins = []
-        for i, label in enumerate(['T (Ch0)', 'G (Ch1)', 'C (Ch2)', 'A (Ch3)']):
-            mxg_g.addWidget(QLabel(label), i, 0)
+        for i, (label, color) in enumerate(zip(['T (Ch0)', 'G (Ch1)', 'C (Ch2)', 'A (Ch3)'],
+                                                  ['red', 'green', 'blue', 'orange'])):
+            lbl = QLabel(label)
+            lbl.setStyleSheet(f'color: {color}; font-weight: bold;')
+            mxg_g.addWidget(lbl, i, 0)
             sl = QSlider(Qt.Horizontal)
             sl.setRange(0, 100)
             sl.setValue(85)
@@ -236,11 +239,7 @@ class SequencingGUI(QMainWindow):
         sliders_l.addWidget(mxg)
 
         # -- 3 plots --
-        self.fig = Figure(figsize=(14, 11), dpi=100)
-        self.fig.subplots_adjust(hspace=0.08, left=0.05, right=0.98, top=0.97, bottom=0.05)
-        self.canvas = FigureCanvasQTAgg(self.fig)
-        self.toolbar = NavigationToolbar2QT(self.canvas, self)
-        layout.addWidget(self.toolbar)
+        # -- Plots --
         layout.addWidget(self.canvas)
 
         # -- Bottom: save + ml + status --
