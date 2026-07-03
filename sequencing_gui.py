@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QGridLayout, QSlider, QTextEdit, QSplitter, QTabWidget,
     QFileDialog, QProgressBar
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QSettings
 
 import matplotlib
 matplotlib.use('Qt5Agg')
@@ -221,7 +221,7 @@ class SequencingGUI(QMainWindow):
             sp.setValue(85)
             sp.setSuffix('%')
             sp.setMinimumWidth(70)
-            sp.setStyleSheet('QSpinBox { font-size: 11pt; font-weight: bold; }')
+            sp.setStyleSheet(f'QSpinBox {{ color: {color}; font-size: 11pt; font-weight: bold; }}')
             self._link_slider_spinbox(sl, sp)
             mxg_g.addWidget(sl, i, 1)
             mxg_g.addWidget(sp, i, 2)
