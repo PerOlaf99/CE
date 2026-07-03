@@ -287,10 +287,16 @@ class SequencingGUI(QMainWindow):
     def _load_esd_traces(self, path):
         with open(path, 'rb') as f:
             raw = f.read()
-        data_end = 8754
-        self.esd_traces = np.zeros((data_end, 4), dtype=np.float64)
-        for i in range(data_end):
-            self.esd_traces[i] = struct.unpack('<ffff', raw[i*20+4:(i+1)*20])
+        n_records = len(raw) // 20
+        self.esd_traces = np.zeros((n_records, 4), dtype=np.float64)
+        for i in range(n_records):
+            try:
+                ch = struct.unpack('<ffff', raw[i*20+4:(i+1)*20])
+                # Filter extreme values (metadata leakage into trace data)
+                ch = tuple(0.0 if np.isnan(c) or np.isinf(c) or abs(c) > 1000 else c for c in ch)
+                self.esd_traces[i] = ch
+            except Exception:
+                self.esd_traces[i] = 0.0
 
     def _process(self):
         if self.rsd_raw is None:
