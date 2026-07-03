@@ -55,23 +55,55 @@ def gain_normalize(corr, bl):
     return corr / bm[np.newaxis, :]
 
 
-def get_true_base(esd_seq, align):
-    """Map each ESD-called base to its true M13 base using alignment."""
-    q_al = align.get('query_aligned', '')
-    r_al = align.get('ref_aligned', '')
+def _nw_align_with_strings(q, r, match=1, mismatch=-1, gap=-2):
+    """Needleman-Wunsch returning aligned strings."""
+    m, n = len(q), len(r)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        dp[i][0] = dp[i - 1][0] + gap
+    for j in range(1, n + 1):
+        dp[0][j] = dp[0][j - 1] + gap
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            diag = dp[i - 1][j - 1] + (match if q[i - 1] == r[j - 1] else mismatch)
+            up = dp[i - 1][j] + gap
+            left = dp[i][j - 1] + gap
+            dp[i][j] = max(diag, up, left)
+    i, j = m, n
+    q_al, r_al = [], []
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + (match if q[i - 1] == r[j - 1] else mismatch):
+            q_al.append(q[i - 1])
+            r_al.append(r[j - 1])
+            i -= 1
+            j -= 1
+        elif i > 0 and dp[i][j] == dp[i - 1][j] + gap:
+            q_al.append(q[i - 1])
+            r_al.append('-')
+            i -= 1
+        else:
+            q_al.append('-')
+            r_al.append(r[j - 1])
+            j -= 1
+    return ''.join(reversed(q_al)), ''.join(reversed(r_al))
+
+
+def align_esd_to_m13(esd_seq):
+    """Align ESD-called sequence to M13 reference, return true bases per position."""
+    q = ''.join(c for c in esd_seq if c in 'ACGT')
+    if len(q) < 20:
+        return esd_seq
+    q_al, r_al = _nw_align_with_strings(q, M13_REFERENCE)
     true_bases = []
-    call_bases = []
-    q_idx = 0
     for qc, rc in zip(q_al, r_al):
         if qc != '-':
-            call_bases.append(qc)
             true_bases.append(rc)
-    return ''.join(true_bases), ''.join(call_bases)
+    return ''.join(true_bases)
 
 
 def derive_matrix_from_wells(wells, esd_key='Cp312', bl_window=200,
                               smooth_win=7, smooth_order=2,
-                              gain_norm=True, align_to_m13=True,
+                              gain_norm=True, use_m13=True,
                               min_peaks_per_base=10):
     """Derive mixing matrix from RSD data at ESD peak positions."""
     esd_dir = ESD_SUBDIRS[esd_key]
@@ -104,17 +136,9 @@ def derive_matrix_from_wells(wells, esd_key='Cp312', bl_window=200,
         else:
             gn = corr.copy()
 
-        if align_to_m13:
-            align = align_to_reference(seq)
-            if align is None or align['aligned_length'] < 20:
-                continue
-            true_seq, _ = get_true_base(seq, align)
-            if len(true_seq) != len(positions):
-                n = min(len(true_seq), len(positions))
-                true_seq = true_seq[:n]
-                positions = positions[:n]
+        if use_m13:
+            true_seq = align_esd_to_m13(seq)
         else:
-            # Use ESD-called sequence directly
             true_seq = seq
 
         n_bases = min(len(true_seq), len(positions))
@@ -128,20 +152,16 @@ def derive_matrix_from_wells(wells, esd_key='Cp312', bl_window=200,
             if total > 0.01:
                 profiles[b].append(sig / total)
 
-    # Compute median profile per base
     mix = np.zeros((4, 4))
-    valid_bases = []
     for i, base in enumerate(['T', 'G', 'C', 'A']):
         arr = np.array(profiles[base])
         if len(arr) < min_peaks_per_base:
             print(f"  WARNING: {base} only {len(arr)} peaks (<{min_peaks_per_base})")
             continue
         med = np.median(arr, axis=0)
-        # Re-normalize to sum=1
         med = med / med.sum()
         col = BASE_TO_COL[base]
         mix[:, col] = med
-        valid_bases.append(base)
 
     return mix, profiles
 
