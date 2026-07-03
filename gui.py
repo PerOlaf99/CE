@@ -4074,24 +4074,19 @@ class ElectropherogramApp(QMainWindow):
                     if is_list:
                         is_peaks_by_well[well] = sorted(is_list, key=lambda x: x[0])
 
-        # Use simple features matching Train IS
+        # Use full feature extraction matching the trained model
         self.status_label.setText("Extracting features...")
         QApplication.processEvents()
         all_wells_sorted = self._get_all_wells()
         X_list, well_ids = [], []
         peak_info_list = []
-        simple_keys = None
 
-        # Determine feature type from model features file
-        use_simple = True
+        # Load expected feature names from model training
+        ref_feats = []
         try:
             ref_feats = pd.read_csv(features_path)['feature'].tolist()
-            simple_feat_names = ['IS_1_scan', 'IS_1_hgt', 'Channel1_mean', 'Channel2_max_peak_hgt',
-                                 'IS_Ch2_ratio_mean', 'Channel3_std']
-            if any(f in ref_feats for f in simple_feat_names):
-                use_simple = True
         except Exception:
-            use_simple = False
+            pass
 
         for well in all_wells_sorted:
             df = self._get_well_trace(well)
@@ -4099,26 +4094,25 @@ class ElectropherogramApp(QMainWindow):
                 continue
 
             try:
+                from train_genotyping import extract_features_from_trace
                 isp = is_peaks_by_well.get(well)
-                feats = self._extract_simple_features(df, is_peaks=isp)
+                feats = extract_features_from_trace(df, is_peaks=isp)
             except Exception:
                 continue
 
-            if simple_keys is None:
-                simple_keys = sorted(feats.keys())
-            row = [feats.get(f, 0.0) for f in simple_keys]
+            if ref_feats:
+                row = [float(feats.get(f, 0.0)) for f in ref_feats]
+            else:
+                keys = sorted(feats.keys())
+                row = [float(feats.get(f, 0.0)) for f in keys]
             X_list.append(row)
             well_ids.append(well)
 
-            # Extract display info
-            is_scans = [int(feats.get(f'IS_{i}_scan', 0)) for i in range(1, 5)]
-            is_heights = [float(feats.get(f'IS_{i}_hgt', 0.0)) for i in range(1, 5)]
-            ch1_scan = int(feats.get('Channel1_max_peak_scan', 0))
-            ch1_hgt = float(feats.get('Channel1_max_peak_hgt', 0.0))
-            ch2_scan = int(feats.get('Channel2_max_peak_scan', 0))
-            ch2_hgt = float(feats.get('Channel2_max_peak_hgt', 0.0))
+            ch1_scan = int(feats.get('Channel1_peak_first_scan', 0))
+            ch1_hgt = float(feats.get('Channel1_peak_max_height', 0.0))
+            ch2_scan = int(feats.get('Channel2_peak_first_scan', 0))
+            ch2_hgt = float(feats.get('Channel2_peak_max_height', 0.0))
 
-            # Fallback to separate detection if simple feats returned zeros
             if ch1_scan == 0 and ch1_hgt == 0.0:
                 from scipy.signal import find_peaks
                 try:
@@ -4143,6 +4137,9 @@ class ElectropherogramApp(QMainWindow):
                         ch2_hgt = float(np.max(h2))
                 except Exception:
                     pass
+
+            is_scans = [int(feats.get(f'IS_peak_{i}_scan', 0)) for i in range(1, 5)]
+            is_heights = [float(feats.get(f'IS_peak_{i}_height', 0.0)) for i in range(1, 5)]
 
             peak_info_list.append({
                 'is_scans': is_scans, 'is_heights': is_heights,
