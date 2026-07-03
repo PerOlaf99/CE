@@ -405,13 +405,14 @@ class SequencingGUI(QMainWindow):
                 esd_traces[i] = ch
             except Exception:
                 esd_traces[i] = 0.0
-        # Clip extreme outliers per channel (99.9th percentile) so peaks are visible
+        # Per-channel clipping at 99th percentile to remove outlier spikes
+        # (these come from metadata leaking into trace sections)
         for ch in range(4):
             vals = esd_traces[:, ch]
-            clip = np.percentile(vals, 99.9)
-            if clip > 0 and vals.max() > clip * 2:
-                esd_traces[:, ch] = np.clip(vals, 0, clip)
-        # Trim trailing records where all channels are consistently zero
+            limit = np.percentile(vals, 99)
+            if 1 < limit < 500:
+                esd_traces[:, ch] = np.clip(vals, 0, limit)
+        # Trim trailing all-zero region
         non_zero = np.any(esd_traces > 0, axis=1)
         if non_zero.any():
             last_nz = np.where(non_zero)[0][-1]
