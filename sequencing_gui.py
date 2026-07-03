@@ -152,7 +152,8 @@ class SequencingGUI(QMainWindow):
         hl_m = QHBoxLayout()
         hl_m.addWidget(QLabel('Method:'))
         self.smooth_combo = QComboBox()
-        self.smooth_combo.addItems(['Savitzky-Golay', 'Gaussian', 'Moving Avg'])
+        self.smooth_combo.addItems(['Savitzky-Golay', 'Gaussian', 'Moving Avg',
+                                    'Median', 'Whittaker'])
         self.smooth_combo.currentTextChanged.connect(self._on_smooth_method_changed)
         hl_m.addWidget(self.smooth_combo)
         smg_g.addLayout(hl_m)
@@ -278,8 +279,15 @@ class SequencingGUI(QMainWindow):
 
     def _on_smooth_method_changed(self, method):
         self._smooth_mode = method
-        self.sm_param2_label.setText(
-            {'Savitzky-Golay': 'Order:', 'Gaussian': 'Sigma:', 'Moving Avg': 'Window2:'}[method])
+        labels = {'Savitzky-Golay': 'Order:', 'Gaussian': 'Sigma:',
+                  'Moving Avg': 'Window2:', 'Median': 'Window2:',
+                  'Whittaker': 'Lambda:'}
+        self.sm_param2_label.setText(labels.get(method, 'Order:'))
+        is_whittaker = method == 'Whittaker'
+        self.sm_win_slider.setRange(3 if not is_whittaker else 100,
+                                    51 if not is_whittaker else 100000)
+        self.sm_win_spin.setRange(3 if not is_whittaker else 100,
+                                  51 if not is_whittaker else 100000)
         self._schedule_update()
 
     def _on_baseline_method_changed(self, method):
@@ -405,6 +413,17 @@ class SequencingGUI(QMainWindow):
                 kernel = np.ones(sw) / sw
                 for ch in range(4):
                     sm[:, ch] = np.convolve(sm[:, ch], kernel, mode='same')
+        elif self._smooth_mode == 'Median':
+            from scipy.ndimage import median_filter
+            sw = max(3, sw if sw % 2 == 1 else sw + 1)
+            for ch in range(4):
+                sm[:, ch] = median_filter(sm[:, ch], size=sw, mode='reflect')
+        elif self._smooth_mode == 'Whittaker':
+            lam = sw
+            n = len(sm)
+            D = np.diff(np.eye(n), 2)
+            for ch in range(4):
+                sm[:, ch] = np.linalg.solve(np.eye(n) + lam * D.T @ D, sm[:, ch])
 
         # Matrix separation
         diag = np.array([s.value() / 100.0 for s in self.mx_sliders])
