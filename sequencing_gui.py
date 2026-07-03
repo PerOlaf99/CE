@@ -7,7 +7,7 @@ Save processed data and run ML basecalling.
 """
 import sys, os, struct, json, subprocess
 import numpy as np
-from scipy.ndimage import minimum_filter1d
+from scipy.ndimage import minimum_filter1d, gaussian_filter1d
 from scipy.signal import savgol_filter
 
 from PyQt5.QtWidgets import (
