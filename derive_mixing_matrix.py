@@ -174,10 +174,12 @@ def evaluate_matrix(mix, label="matrix"):
     print(f"    Condition: {cond:.4f}")
     print(f"    Matrix (rows=Ch0-3, cols=[T,G,C,A]):")
     for r in range(4):
-        print(f"      {mix[r]:8.4f}")
+        vals = tuple(mix[r])
+        print(f"      {vals[0]:8.4f} {vals[1]:8.4f} {vals[2]:8.4f} {vals[3]:8.4f}")
     print(f"    Inverse (rows=Ch0-3, cols=[T,G,C,A]):")
     for r in range(4):
-        print(f"      {inv[r]:8.4f}")
+        vals = tuple(inv[r])
+        print(f"      {vals[0]:8.4f} {vals[1]:8.4f} {vals[2]:8.4f} {vals[3]:8.4f}")
     diag = np.diag(mix)
     print(f"    Diagonals: {np.array2string(diag, precision=4)}")
     return cond
