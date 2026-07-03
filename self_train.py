@@ -155,7 +155,9 @@ def evaluate_well(model, well):
         esd = parse_esd(os.path.join(BASE_DIR, ESD_DIR, f"{well}.esd"))
     except Exception:
         return 0, 0
-    positions = esd.get('peak_positions') or esd.get('bases_positions')
+    positions = esd.get('peak_positions')
+    if positions is None:
+        positions = esd.get('bases_positions')
     seq = esd.get('sequence','')
     if not seq or positions is None:
         return 0, 0

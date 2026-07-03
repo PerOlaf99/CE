@@ -2077,11 +2077,17 @@ class ElectropherogramApp(QMainWindow):
         self.status_label.setText(f"Displaying {', '.join(page_wells)}")
 
     def _redraw_peaks_only(self, clicked_well):
+        saved_xlim = None
+        if self.subplots and not self.auto_scale_x:
+            saved_xlim = self.subplots[0]['ax'].get_xlim()
         self._ensure_well_detected(clicked_well)
         self._apply_is_filter()
         self._draw_peak_markers()
         self._populate_table_and_is()
         self.canvas.draw()
+        if saved_xlim is not None and self.subplots:
+            self.subplots[0]['ax'].set_xlim(saved_xlim)
+            self.canvas.draw()
 
     def _update_esd_caller_combo(self):
         self._esd_caller_combo.blockSignals(True)
