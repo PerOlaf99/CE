@@ -84,7 +84,9 @@ class SequencingGUI(QMainWindow):
         self.current_well = None
         self._saved_lims = {}
         self._smooth_mode = 'Savitzky-Golay'
+        self._settings = QSettings('opencode', 'sequencing_gui')
         self._setup_ui()
+        self._restore_settings()
         self._populate_wells()
 
     def _setup_ui(self):
@@ -282,6 +284,38 @@ class SequencingGUI(QMainWindow):
             self._schedule_update()
         slider.valueChanged.connect(on_slider)
         spinbox.valueChanged.connect(on_spinbox)
+
+    def _save_settings(self):
+        self._settings.setValue('baseline_method', self.baseline_combo.currentText())
+        self._settings.setValue('baseline_window', self.bl_spin.value())
+        self._settings.setValue('smooth_method', self.smooth_combo.currentText())
+        self._settings.setValue('smooth_window', self.sm_win_spin.value())
+        self._settings.setValue('smooth_order', self.sm_ord_spin.value())
+        for i, sl in enumerate(self.mx_sliders):
+            self._settings.setValue(f'matrix_{i}', sl.value())
+
+    def _restore_settings(self):
+        def restore_combo(combo, key, default):
+            val = self._settings.value(key, default)
+            idx = combo.findText(val)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        def restore_spin(spin, key, default):
+            spin.setValue(int(self._settings.value(key, default)))
+        restore_combo(self.baseline_combo, 'baseline_method', 'Rolling Minimum')
+        restore_spin(self.bl_spin, 'baseline_window', 200)
+        restore_combo(self.smooth_combo, 'smooth_method', 'Savitzky-Golay')
+        restore_spin(self.sm_win_spin, 'smooth_window', 7)
+        restore_spin(self.sm_ord_spin, 'smooth_order', 2)
+        # Force combo signal to update labels/ranges
+        self._on_smooth_method_changed(self.smooth_combo.currentText())
+        for i, sl in enumerate(self.mx_sliders):
+            default = 85 if i < 3 else 83
+            sl.setValue(int(self._settings.value(f'matrix_{i}', default)))
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
 
     def _on_smooth_method_changed(self, method):
         self._smooth_mode = method
