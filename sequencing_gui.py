@@ -111,7 +111,7 @@ class SequencingGUI(QMainWindow):
 
         # -- Sliders panel --
         sliders_w = QWidget()
-        sliders_w.setMinimumHeight(130)
+        sliders_w.setMinimumHeight(200)
         sliders_l = QHBoxLayout(sliders_w)
         sliders_l.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(sliders_w)
@@ -473,12 +473,14 @@ class SequencingGUI(QMainWindow):
                          bbox=dict(boxstyle='round,pad=0.02', facecolor='white',
                                    alpha=0.6, edgecolor=color))
 
-        # Plot 4: ESD traces with peaks
+        # Plot 4: ESD traces with peaks (standalone, autoscaled y-axis)
         for ch in range(4):
-            ax4.plot(self.x_esd, self.esd_traces[:, ch], color=CHAN_COLORS[ch], linewidth=0.5)
+            ax4.plot(self.x_esd, self.esd_traces[:, ch], color=CHAN_COLORS[ch], linewidth=0.5,
+                     label=f'ESD {BASE_LETTERS[ch]}')
         ax4.set_ylabel('ESD traces', fontsize=8)
         ax4.set_xlabel('Scan / Record index', fontsize=8)
         ax4.tick_params(labelsize=7)
+        ax4.legend(fontsize=5, ncol=4, loc='upper right')
 
         if peaks is not None and seq:
             n_esd_recs = len(self.esd_traces)
@@ -525,6 +527,11 @@ class SequencingGUI(QMainWindow):
 
         # Restore zoom state from before the redraw
         self._restore_limits([ax1, ax2, ax3, ax4])
+
+        # Label x-axis only on bottom-most plot
+        for ax in [ax1, ax2, ax3]:
+            ax.set_xlabel('')
+        ax4.set_xlabel('Scan / Record index', fontsize=8)
 
         self.canvas.draw()
 
