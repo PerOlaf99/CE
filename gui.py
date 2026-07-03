@@ -3558,13 +3558,14 @@ class ElectropherogramApp(QMainWindow):
                 continue
             peaks = wd.get('peaks', [])
             pchs = wd.get('peak_channels', [])
-            phgts = wd.get('peak_heights', [])
+            df = self.all_data.get(well)
+            ch3_raw = df['Channel3'].values.astype(float) if df is not None else None
             ch3_peaks = []
             for i, s in enumerate(peaks):
                 ch = pchs[i] if i < len(pchs) else ''
                 if ch == 2 or ch == 'Channel3':
-                    h = phgts[i] if i < len(phgts) else 0.0
-                    ch3_peaks.append((int(s), float(h)))
+                    h = float(ch3_raw[int(s)]) if ch3_raw is not None and int(s) < len(ch3_raw) else 0.0
+                    ch3_peaks.append((int(s), h))
             ch3_peaks.sort(key=lambda x: x[0])
             if not ch3_peaks:
                 continue
