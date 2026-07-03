@@ -179,12 +179,20 @@ def evaluate_well(model, well):
     return rf_id, cp_id
 
 
-def self_train_loop(initial_labeled_wells, eval_wells, n_iters=3, threshold=0.95):
+def self_train_loop(initial_labeled_wells, eval_wells, n_iters=3, threshold=0.95,
+                    npz_path=None):
     """Self-training loop. Returns history of iterations."""
     history = []
 
     train_wells = list(initial_labeled_wells)
-    X_base, y_base, w_base = load_esd_labels(train_wells)
+
+    if npz_path:
+        X_all, y_all, w_all = load_esd_labels_from_npz(npz_path)
+        mask = np.isin(w_all, train_wells)
+        X_base, y_base = X_all[mask], y_all[mask]
+        print(f"Loaded {len(y_base)} samples from npz for {len(train_wells)} training wells")
+    else:
+        X_base, y_base, w_base = load_esd_labels(train_wells)
 
     for it in range(n_iters):
         print(f"\n{'='*60}")
