@@ -2208,10 +2208,14 @@ class ElectropherogramApp(QMainWindow):
 
     def _populate_table_and_is(self):
         all_rows = []
+        visible_channels = set(ch for ch, btn in self.channel_buttons.items() if btn.isChecked())
+        if self._is_channel and self._is_channel in self.channel_buttons:
+            visible_channels.add(self._is_channel)
         for well, wd in self._well_data.items():
             if well not in self.all_data:
                 continue
-            all_rows.extend(self.detector.build_peak_rows(well, wd))
+            rows = self.detector.build_peak_rows(well, wd)
+            all_rows.extend(r for r in rows if r['channel'] in visible_channels)
 
         self.peak_table.blockSignals(True)
         self.peak_table.setRowCount(len(all_rows))
@@ -2249,8 +2253,7 @@ class ElectropherogramApp(QMainWindow):
         if self._is_channel:
             self.is_channel_combo.setCurrentText(self._is_channel)
         else:
-            self.is_channel_combo.setCurrentText('Channel3')
-            self._is_channel = 'Channel3'
+            self.is_channel_combo.setCurrentText(IS_NONE_OPTION)
         ch = self.is_channel_combo.currentText()
         if ch and ch != IS_NONE_OPTION:
             count = sum(1 for row in all_rows if row['channel'] == ch)
@@ -2328,8 +2331,6 @@ class ElectropherogramApp(QMainWindow):
 
     def _update_summary(self):
         is_area = self._find_is_area()
-        if is_area is None:
-            is_area = 0
         sample_area = 0
         for i in range(self.peak_table.rowCount()):
             item = self.peak_table.item(i, 7)
@@ -2338,12 +2339,19 @@ class ElectropherogramApp(QMainWindow):
                     sample_area += float(item.text())
                 except ValueError:
                     pass
-        ratio = sample_area / is_area if is_area != 0 else 0
-        self.summary_label.setText(
-            f"IS Area: {is_area:.0f}    "
-            f"Sample Area: {sample_area:.0f}    "
-            f"Area/IS: {ratio:.3f}"
-        )
+        if self._is_channel:
+            is_area_val = is_area if is_area is not None else 0
+            ratio = sample_area / is_area_val if is_area_val != 0 else 0
+            self.summary_label.setText(
+                f"IS Area: {is_area_val:.0f}    "
+                f"Sample Area: {sample_area:.0f}    "
+                f"Area/IS: {ratio:.3f}"
+            )
+        else:
+            self.summary_label.setText(
+                f"IS: None    "
+                f"Sample Area: {sample_area:.0f}"
+            )
 
     def _on_table_edited(self):
         self._update_summary()

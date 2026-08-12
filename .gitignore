@@ -37,3 +37,17 @@ base_caller_model_with_bg_confidence.csv
 *.npz
 *.h5
 env/
+
+# Large binaries / raw instrument data
+*.keras
+*.rsd
+*.npy
+*.png
+
+# Logs and machine-generated outputs
+*.log
+*_results.json
+overnight_*.json
+
+# Temp / duplicate copies
+*kopi*

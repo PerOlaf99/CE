@@ -1,0 +1,47 @@
+{
+  "baseline_method": "Rolling Median",
+  "baseline_window": 510,
+  "baseline_window2": 27,
+  "esd_variant": "Cp312",
+  "matrix": [
+    [
+      0.8,
+      0.69,
+      0.11999999999999998,
+      0.18000000000000002
+    ],
+    [
+      0.2,
+      0.8,
+      0.10999999999999999,
+      0.17
+    ],
+    [
+      0.5,
+      0.5,
+      0.5,
+      0.56
+    ],
+    [
+      0.36,
+      0.3,
+      0.18000000000000002,
+      0.4000000000000001
+    ]
+  ],
+  "matrix_apply_point": "smoothed",
+  "min_distance": 1,
+  "min_signal_frac": 1.0,
+  "mobility_shifts": [
+    5,
+    10,
+    11,
+    11
+  ],
+  "norm_window": 800,
+  "prominence_frac": 0.026,
+  "smooth_method": "FFT Lowpass",
+  "smooth_order": 1,
+  "smooth_window": 5,
+  "well": "A01"
+}
