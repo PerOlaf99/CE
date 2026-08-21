@@ -45,6 +45,11 @@ from matplotlib.collections import LineCollection
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from extract_training_data import parse_rsd, parse_esd
 
+try:
+    from cimarrontv import cimarron_bgn_end as _cimarron_bgn_end
+except Exception:
+    _cimarron_bgn_end = None
+
 DEFAULT_DATA_DIR = "/media/tv/78B0C7DE1FA7081C/electropherogram/MB1000_M13_DT"
 CHAN_COLORS = ['red', 'green', 'blue', 'orange']
 BASE_LETTERS = {0: 'T', 1: 'G', 2: 'C', 3: 'A'}
@@ -73,6 +78,17 @@ DEFAULT_SPEC_MATRIX = np.array([
     [0.07, 0.05, 0.05, 0.83],
 ], dtype=np.float64)
 
+# Validated tuned crosstalk matrix for the Cimarron (tuned) basecall method
+# (from A01_settings.json; the configuration that reached ~95% identity vs
+# the true M13 reference). Used only when the user has not customized the
+# matrix grid away from the factory default.
+_TUNED_SSM = np.array([
+    [1.0, 1.00, 0.26, 0.46],
+    [0.07, 1.00, 0.075, 0.006],
+    [0.38, 0.33, 1.00, 1.52],
+    [0.27, 0.26, 0.189, 1.00],
+], dtype=np.float64)
+
 OFF_PATTERN = np.array([
     [0.00, 0.20, 0.33, 0.47],
     [0.17, 0.00, 0.33, 0.50],
@@ -84,6 +100,7 @@ BASELINE_METHODS = [
     'None', 'Rolling Minimum', 'Rolling Median', 'ALS', 'airPLS', 'SNIP',
     'Morphological (Top-hat)', 'Polynomial Detrend',
     'Rubberband', 'AsyLS', 'arPLS', 'Flat Offset (200-1200)',
+    'Noise Offset (pre-1500)',
 ]
 
 SMOOTH_METHODS = [
@@ -206,6 +223,7 @@ BASELINE_PARAM_CONFIG = {
     'AsyLS':                    ('Lambda:', (20, 100000), 'Asymmetry x100:', (1, 100)),
     'arPLS':                    ('Lambda:', (20, 100000), 'Max iters:', (5, 200)),
     'Flat Offset (200-1200)':   ('Start scan:', (100, 2000), 'End scan:', (300, 4000)),
+    'Noise Offset (pre-1500)':  ('Noise start:', (0, 500), 'Noise end:', (500, 3000)),
 }
 
 
@@ -457,6 +475,23 @@ def dsp_compute_baseline(raw, method, window, window2=None):
             ch_region = region[:, ch]
             if len(ch_region) > 0:
                 bl[:, ch] = float(np.median(ch_region))
+    elif method == 'Noise Offset (pre-1500)':
+        # 2-stage-baseline stage 1: measure the electronic/dye-blob noise floor
+        # in the runs BEFORE the first real peaks (fixed scans 0-1499, the flat
+        # lead-in) and subtract that per-channel constant. The matrix
+        # separation then sees a trace already free of the common-mode offset
+        # (which otherwise bleeds negative artifacts into adjacent channels),
+        # and the chosen 2nd-stage method (e.g. AsyLS) cleans remaining drift.
+        # The ``window``/``window2`` knobs are NOT used here - they stay free
+        # for the 2nd-stage method.
+        end = min(n, 1500)
+        if end <= 1:
+            end = n
+        region = raw[:end]
+        for ch in range(4):
+            ch_region = region[:, ch]
+            if len(ch_region) > 0:
+                bl[:, ch] = float(np.median(ch_region))
     else:
         raise ValueError(f'Unknown baseline method: {method}')
     return bl
@@ -622,6 +657,12 @@ def dsp_full_pipeline(raw, mobility_shifts, baseline_method, baseline_window,
       'none'       - no separation at all; ``separated`` is just the
                      corrected + smoothed signal (the raw 4 channels pass
                      straight through to peak calling)
+      'offset'     - two-stage baseline: subtract the pre-peak noise floor
+                     (Noise Offset baseline, i.e. per-channel median of the
+                     lead-in scans), THEN separate the offset-corrected trace,
+                     THEN run the chosen baseline method on the separated
+                     signal before smoothing. This is your "measure noise
+                     before 1500, subtract, matrix-correct, then AsyLS" order.
       'raw'        - separate the raw data, then baseline-correct the
                      separated signal, then smooth it
       'corrected'  - separate the baseline-corrected signal, then smooth the
@@ -634,6 +675,19 @@ def dsp_full_pipeline(raw, mobility_shifts, baseline_method, baseline_window,
     separated trace only just before peak detection).
     """
     raw = raw.copy()
+    if matrix_apply_point == 'offset':
+        # stage 1: noise floor only (the 'Noise Offset (pre-1500)' method)
+        off = dsp_compute_baseline(raw, 'Noise Offset (pre-1500)',
+                                   baseline_window, baseline_window2)
+        off_corr = np.clip(raw - off, 0, None)
+        sep_raw = dsp_separate_channels(off_corr, off, matrix)
+        # stage 2: chosen baseline (e.g. AsyLS) on the separated signal
+        sep_bl = dsp_compute_baseline(sep_raw, baseline_method, baseline_window,
+                                      baseline_window2)
+        sep_corr = np.clip(sep_raw - sep_bl, 0, None)
+        separated = dsp_smooth_signal(sep_corr, smooth_method, smooth_window,
+                                      smooth_order)
+        return raw, off, off_corr, sep_corr, separated, matrix
     bl = dsp_compute_baseline(raw, baseline_method, baseline_window, baseline_window2)
     corr = np.clip(raw - bl, 0, None)
     sm = dsp_smooth_signal(corr, smooth_method, smooth_window, smooth_order)
@@ -759,7 +813,7 @@ def pc_detect_peaks_4ch(separated, min_distance=6, prominence_frac=0.02, width=N
         if scale <= 0:
             continue
         prom = max(scale * prominence_frac, 1e-9)
-        kwargs = dict(distance=max(1, int(min_distance)), prominence=prom)
+        kwargs = dict(distance=max(1.0, float(min_distance)), prominence=prom)
         if width is not None:
             kwargs['width'] = width
         peaks, _ = find_peaks(x[:, ch], **kwargs)
@@ -1163,7 +1217,8 @@ def pc_fill_in_combined_peaks(separated, shifts, positions=None,
     norm = comb / rolled
     scale = np.percentile(np.clip(norm, 0, None), 99.5)
     prom = max(scale * prominence_frac, 1e-9) if scale > 0 else 1e-9
-    peaks, _ = _fp(norm, distance=max(1, int(min_distance)), prominence=prom)
+    peaks, _ = _fp(norm, distance=max(1.0, float(min_distance)),
+                   prominence=prom)
 
     lead_n = max(int(n * 0.05), 1)
     ch_floor = [float(np.percentile(np.clip(shifted_all[ch][:lead_n], 0, None), 90))
@@ -2115,7 +2170,13 @@ class SequencingGUI(QMainWindow):
         # -- Figure + canvas + toolbar --
         self.fig = Figure(figsize=(14, 11), dpi=100)
         self.fig.subplots_adjust(hspace=0.08, left=0.14, right=0.98, top=0.97, bottom=0.05)
+        # The figure's sizeHint would otherwise be 1400x1100px, and inside the
+        # non-collapsible QSplitter that pins the window's minimum width to
+        # ~1820px - wider than most screens, so the right edge is pushed
+        # off-screen and cannot be grabbed to resize. Allow the canvas to
+        # shrink so the window is freely resizable.
         self.canvas = FigureCanvasQTAgg(self.fig)
+        self.canvas.setMinimumSize(200, 200)
         self.canvas.mpl_connect('button_press_event', self._on_canvas_press)
         self.canvas.mpl_connect('motion_notify_event', self._on_canvas_move)
         self.canvas.mpl_connect('button_release_event', self._on_canvas_release)
@@ -2375,7 +2436,8 @@ class SequencingGUI(QMainWindow):
         pdg_g.setVerticalSpacing(4)
         self.method_combo = QComboBox()
         self.method_combo.addItems(['Greedy (max-intensity)',
-                                    'Per-channel (cluster)'])
+                                    'Per-channel (cluster)',
+                                    'Cimarron (tuned)'])
         self.method_combo.setToolTip(
             'Independent basecall strategy.\n\n'
             'Greedy (max-intensity): repeatedly call the strongest peak of '
@@ -2386,18 +2448,29 @@ class SequencingGUI(QMainWindow):
             'remaining-envelope fraction.\n\n'
             'Per-channel (cluster): detect peaks on each channel separately '
             'and merge near-coincident peaks into IUPAC ambiguity codes. '
-            'Uses Distance, Prom, Ambig, Tolerance and Fill-in.')
-        self.method_combo.currentIndexChanged.connect(self._on_method_changed)
+            'Uses Distance, Prom, Ambig, Tolerance and Fill-in.\n\n'
+            'Cimarron (tuned): runs the full cimarrontv.py Cimarron312 '
+            'engine (port of the csibq030012.dll pipeline) end-to-end on the '
+            'raw RSD channels with the validated tuned DSP: AsyLS baseline, '
+            'Butterworth 5/9 smoothing, crosstalk separation, perbase '
+            'begin/end detection and the greedy caller. ~95% identity vs the '
+            'true M13 reference (DLL ~96%), best result achieved on this '
+            'plate. Uses the current Matrix and Mobility Shifts from this '
+            'GUI; baseline/smoothing knobs above do not affect this method.')
+        pdg_g.addWidget(QLabel('Variant:'), 0, 2)
         pdg_g.addWidget(QLabel('Method:'), 0, 0)
         pdg_g.addWidget(self.method_combo, 0, 1)
-        self.distance_spin = QSpinBox()
+        self.method_combo.currentIndexChanged.connect(self._on_method_changed)
+        self.distance_spin = QDoubleSpinBox()
+        self.distance_spin.setDecimals(2)
+        self.distance_spin.setSingleStep(0.5)
         self.distance_spin.setToolTip(
             'Minimum horizontal distance between detected peaks, in scans. '
             'Peaks closer than this in the same channel are treated as one '
             'call. Too small = double-calls on noisy peaks; too large = '
-            'misses real close bases.')
-        self.distance_spin.setRange(1, 1000)
-        self.distance_spin.setValue(5)
+            'misses real close bases. Decimals allowed (e.g. 4.63).')
+        self.distance_spin.setRange(0.1, 1000.0)
+        self.distance_spin.setValue(5.0)
         self.distance_spin.valueChanged.connect(self._schedule_update)
         pdg_g.addWidget(QLabel('Distance:'), 1, 0)
         pdg_g.addWidget(self.distance_spin, 1, 1)
@@ -2541,22 +2614,31 @@ class SequencingGUI(QMainWindow):
         self.region_auto_check.setChecked(True)
         self.region_auto_check.toggled.connect(self._on_region_auto_toggled)
         rg_g.addWidget(self.region_auto_check, 0, 0, 1, 2)
+        self.region_hybrid_check = QCheckBox('Hybrid tail (perbase end)')
+        self.region_hybrid_check.setChecked(True)
+        self.region_hybrid_check.setToolTip(
+            'Auto mode: replace the looser legacy tail (10% of in-region max '
+            'on the separated trace) with the Cimarron per-base end detector '
+            'on the raw trace, trimmed by 120 scans. Cuts the decaying-noise '
+            'tail that otherwise over-calls; ~+0.5pp NW on the 96-well plate.')
+        self.region_hybrid_check.toggled.connect(self._schedule_update)
+        rg_g.addWidget(self.region_hybrid_check, 1, 0, 1, 2)
         self.region_start_spin = QSpinBox()
         self.region_start_spin.setRange(0, 1000000)
         self.region_start_spin.setValue(0)
         self.region_start_spin.setToolTip(
             'First scan of the callable signal window (0 = start of file).')
         self.region_start_spin.valueChanged.connect(self._schedule_update)
-        rg_g.addWidget(QLabel('From:'), 1, 0)
-        rg_g.addWidget(self.region_start_spin, 1, 1)
+        rg_g.addWidget(QLabel('From:'), 2, 0)
+        rg_g.addWidget(self.region_start_spin, 2, 1)
         self.region_stop_spin = QSpinBox()
         self.region_stop_spin.setRange(0, 1000000)
         self.region_stop_spin.setValue(0)
         self.region_stop_spin.setToolTip(
             'Last scan of the callable signal window (0 = end of file).')
         self.region_stop_spin.valueChanged.connect(self._schedule_update)
-        rg_g.addWidget(QLabel('To:'), 2, 0)
-        rg_g.addWidget(self.region_stop_spin, 2, 1)
+        rg_g.addWidget(QLabel('To:'), 3, 0)
+        rg_g.addWidget(self.region_stop_spin, 3, 1)
         sliders_l.addWidget(rg)
 
         # -- Matrix-stage tick boxes (narrow column left of the plots) --
@@ -2568,10 +2650,12 @@ class SequencingGUI(QMainWindow):
         # just before basecalling/peak detection.
         self._stage_cbs = {}
         stage_col = QWidget()
-        stage_col.setFixedWidth(104)
+        stage_col.setFixedWidth(118)
         stage_col.setToolTip(
             'Tick the graph at the pipeline stage where the separation '
             'matrix is applied.\n'
+            'Noise: pre-1500 noise floor subtracted, then matrix, then the '
+            'chosen baseline (2-stage) floating graph only.\n'
             'Raw: raw --matrix--> baseline --smooth--> shift -> call\n'
             'Corrected: raw --baseline--> --matrix--> smooth -> shift -> call\n'
             'Smoothed: raw --baseline--> --smooth--> --matrix--> shift -> call\n'
@@ -2580,7 +2664,8 @@ class SequencingGUI(QMainWindow):
         stage_l.setContentsMargins(2, 0, 2, 0)
         stage_l.setSpacing(0)
         stage_l.addWidget(QLabel('Matrix'), alignment=Qt.AlignHCenter)
-        for _stage, _label in [('raw', 'on Raw'),
+        for _stage, _label in [('offset', 'on Noise+Mat'),
+                               ('raw', 'on Raw'),
                                ('corrected', 'on Corrected'),
                                ('smoothed', 'on Smoothed'),
                                ('shifted', 'on Shifted')]:
@@ -2632,6 +2717,14 @@ class SequencingGUI(QMainWindow):
             'trace and report its agreement with the ESD sequence.')
         self.ml_btn.clicked.connect(self._run_ml)
         bottom.addWidget(self.ml_btn)
+        self.ml_fasta_btn = QPushButton('Export ML FASTA')
+        self.ml_fasta_btn.setToolTip(
+            'Write the last ML basecall (at ESD peak positions) to a FASTA '
+            'file plus an alignment report vs both the ESD call and the '
+            'true M13 reference.')
+        self.ml_fasta_btn.clicked.connect(self._export_ml_fasta)
+        self.ml_fasta_btn.setEnabled(False)
+        bottom.addWidget(self.ml_fasta_btn)
         self.peakcall_btn = QPushButton('Independent peak-call vs ESD')
         self.peakcall_btn.setToolTip(
             'Detects peaks on the separated trace itself (no ESD peak '
@@ -2889,6 +2982,7 @@ class SequencingGUI(QMainWindow):
             self._settings.setValue(f'mobility_shift_{ch}',
                                     self.mobility_spins[ch].value())
         self._settings.setValue('region_auto', self.region_auto_check.isChecked())
+        self._settings.setValue('region_hybrid', self.region_hybrid_check.isChecked())
         self._settings.setValue('region_start', self.region_start_spin.value())
         self._settings.setValue('region_stop', self.region_stop_spin.value())
 
@@ -2900,6 +2994,8 @@ class SequencingGUI(QMainWindow):
                 combo.setCurrentIndex(idx)
         def restore_spin(spin, key, default):
             spin.setValue(int(self._settings.value(key, default)))
+        def restore_dspin(spin, key, default):
+            spin.setValue(float(self._settings.value(key, default)))
         restore_combo(self.baseline_combo, 'baseline_method', 'Rolling Minimum')
         restore_spin(self.bl_spin, 'baseline_window', 200)
         restore_spin(self.bl2_spin, 'baseline_window2', 1)
@@ -2912,7 +3008,7 @@ class SequencingGUI(QMainWindow):
             self.method_combo.setCurrentIndex(int(_method))
         except (TypeError, ValueError):
             self.method_combo.setCurrentIndex(0)
-        restore_spin(self.distance_spin, 'min_distance', 5)
+        restore_dspin(self.distance_spin, 'min_distance', 5)
         restore_spin(self.prominence_spin, 'prominence_frac', 200)
         restore_spin(self.ambig_spin, 'min_signal_frac', 25)
         restore_spin(self.tol_spin, 'tolerance', 4)
@@ -2941,6 +3037,9 @@ class SequencingGUI(QMainWindow):
         _region_auto = self._settings.value('region_auto', True)
         self.region_auto_check.setChecked(
             _region_auto in (True, 'true', 'True', '1', 1))
+        _region_hybrid = self._settings.value('region_hybrid', True)
+        self.region_hybrid_check.setChecked(
+            _region_hybrid in (True, 'true', 'True', '1', 1))
         restore_spin(self.region_start_spin, 'region_start', 0)
         restore_spin(self.region_stop_spin, 'region_stop', 0)
         self._on_region_auto_toggled(self.region_auto_check.isChecked())
@@ -3105,7 +3204,7 @@ class SequencingGUI(QMainWindow):
             self.norm_window_spin.setValue(
                 max(1, int(round(float(settings_dict['norm_window'])))))
         if 'min_distance' in settings_dict:
-            self.distance_spin.setValue(int(settings_dict['min_distance']))
+            self.distance_spin.setValue(float(settings_dict['min_distance']))
         if 'basecall_method' in settings_dict:
             idx = int(settings_dict['basecall_method'])
             if 0 <= idx < self.method_combo.count():
@@ -3619,6 +3718,7 @@ class SequencingGUI(QMainWindow):
         auto = bool(checked)
         self.region_start_spin.setEnabled(not auto)
         self.region_stop_spin.setEnabled(not auto)
+        self.region_hybrid_check.setEnabled(auto)
         self._schedule_update()
 
     def _on_method_changed(self, index):
@@ -3629,15 +3729,20 @@ class SequencingGUI(QMainWindow):
             self.distance_spin.setValue(5)
             self.prominence_spin.setValue(200)     # min_frac 0.20
             self.norm_window_spin.setValue(800)
-        else:            # Per-channel (cluster)
+        elif index == 1:  # Per-channel (cluster)
             self.distance_spin.setValue(5)
             self.prominence_spin.setValue(75)      # prominence_frac 0.075
             self.norm_window_spin.setValue(2000)
+        # index 2 = Cimarron (tuned): DSP settings are fixed inside the
+        # engine; the peak-call spins are unused so leave them untouched.
 
     def _call_bases(self, separated, shifts, region):
         """Run the independent basecall with the currently selected method,
         returning (positions, sequence, base_groups, intensities)."""
-        if self.method_combo.currentIndex() == 0:
+        idx = self.method_combo.currentIndex()
+        if idx == 2:
+            return self._call_bases_cimarron()
+        if idx == 0:
             return pc_call_bases_greedy(
                 separated, shifts,
                 window=max(1, self.distance_spin.value()),
@@ -3655,6 +3760,45 @@ class SequencingGUI(QMainWindow):
             region=region,
         )
 
+    def _call_bases_cimarron(self):
+        """Run the tuned cimarrontv Cimarron312 engine on the raw RSD
+        channels. Returns the GUI (positions, sequence, base_groups,
+        intensities) contract using the engine's peak positions, sequence,
+        and per-peak heights, so the existing plot overlay keeps working.
+
+        Uses the validated tuned configuration (A01_settings.json bleed
+        matrix, mobility shifts 5/11/10/10, AsyLS baseline, Butterworth 5/9,
+        'smoothed' matrix apply point, perbase begin/end, greedy caller) by
+        default, but honors the GUI's matrix/shift spin boxes whenever the
+        user has customized them away from the factory defaults."""
+        import cimarrontv as _cim
+        if self.rsd_raw is None:
+            return (np.array([], dtype=np.int64), '', [], [])
+        raw = np.asarray(self.rsd_raw, dtype=np.float64)   # (N,4)
+        tuned = dict(baseline_method="AsyLS",
+                     baseline_window=50010,
+                     smooth_method="Butterworth",
+                     smooth_window=5,
+                     smooth_order=9,
+                     matrix_apply_point="smoothed",
+                     caller="greedy",
+                     bgn_end_method="perbase",
+                     greedy_window=6)
+        # Always run the validated tuned configuration so the method is
+        # reproducible. The GUI matrix/shift knobs above the plot drive the
+        # other two basecall methods; this one is intentionally fixed.
+        tuned['spec_sep_matrix'] = _TUNED_SSM
+        tuned['mobility_shifts'] = (5, 11, 10, 10)
+        eng = _cim.Cimarron312(variant="3.12", **tuned)
+        res = eng.call(raw)
+        seq = res.sequence
+        positions = np.array([p.idx for p in res.peaks], dtype=np.int64)
+        letters = [p.base for p in res.peaks]
+        base_groups = [frozenset([l]) for l in letters]
+        intensities = [{l: float(p.height)} for p, l in
+                       zip(res.peaks, letters)]
+        return positions, seq, base_groups, intensities
+
     def _get_region(self, separated):
         """Return the (start, stop) scan window that confines
         normalization + basecalling to the real signal.
@@ -3668,6 +3812,16 @@ class SequencingGUI(QMainWindow):
             return None
         if self.region_auto_check.isChecked():
             start, stop = pc_signal_region(separated)
+            if (self.region_hybrid_check.isChecked()
+                    and _cimarron_bgn_end is not None
+                    and getattr(self, 'rsd_raw', None) is not None):
+                try:
+                    _, pend = _cimarron_bgn_end(
+                        np.asarray(self.rsd_raw, dtype=np.float64),
+                        method='perbase')
+                    stop = min(len(separated), max(start, int(pend) - 120))
+                except Exception:
+                    pass
             self.region_start_spin.blockSignals(True)
             self.region_stop_spin.blockSignals(True)
             self.region_start_spin.setValue(int(start))
@@ -3942,7 +4096,7 @@ class SequencingGUI(QMainWindow):
                 # relevant for the per-channel cluster method - the greedy
                 # caller already resolves tight peaks.
                 fillin_pos = []
-                if (self.method_combo.currentIndex() != 0
+                if (self.method_combo.currentIndex() == 1
                         and self.fillin_check.isChecked()):
                     fillin_add = pc_fill_in_combined_peaks(
                         separated, shifts,
@@ -4191,12 +4345,19 @@ class SequencingGUI(QMainWindow):
             bases.append(base)
             quals.append(qual)
         called = ''.join(bases)
+        self._ml_called = called
+        self._ml_quals = np.array(quals, dtype=np.int32)
+        self._ml_positions = valid_positions
+        self._ml_raw_seq = esd_seq_valid
 
-        # Identity vs ESD
-        n = min(len(called), len(esd_seq_valid))
-        matches_esd = sum(1 for a, b in zip(called[:n], esd_seq_valid[:n])
-                         if a == b)
-        esd_identity = matches_esd / n * 100 if n > 0 else 0
+        # Identity vs ESD: full global (Needleman-Wunsch) alignment instead of
+        # the circular position-indexed match so known small ESD base errors
+        # don't drag the score down - the fair comparison against a second
+        # caller is alignment identity, same as the M13 metric. N bases are
+        # kept (they are real mismatches to ESD, unlike align_to_m13 which
+        # strips them).
+        from peak_calling import nw_identity as _nw_esd
+        esd_identity = _nw_esd(called, esd_seq_valid, max_len=20000)
 
         # Identity vs M13 (true ground truth)
         from simple_align import M13_REFERENCE
@@ -4213,10 +4374,69 @@ class SequencingGUI(QMainWindow):
 
         non_n = sum(1 for b in bases if b != 'N')
         self.progress.setValue(100)
+        self._ml_esd_identity = esd_identity
+        self._ml_m13_identity = m13_identity
         self.status.setText(
             f'ML basecall: {non_n}/{len(bases)} called (avg conf {avg_conf:.0f}%). '
-            f'vs ESD={esd_identity:.1f}%, vs M13={m13_identity:.1f}%')
-        QTimer.singleShot(3000, lambda: self.progress.setVisible(False))
+            f'vs ESD={esd_identity:.1f}%, vs M13={m13_identity:.1f}%'
+            f' - use "Export ML FASTA" to save it')
+        self.ml_fasta_btn.setEnabled(True)
+        QTimer.singleShot(4000, lambda: self.progress.setVisible(False))
+
+    def _export_ml_fasta(self):
+        """Write the stored ML basecall to a FASTA file plus a comparison
+        report against both the ESD call and the true M13 reference.
+
+        Only the confidently-called positions are FASTA bases; low-confidence
+        calls are written as N so the record stays length-identical with the
+        ESD call for easy columnwise diffing (ESD has a few known errors, so
+        seeing both strings side by side makes disagreements visible)."""
+        well = self.current_well
+        if well is None or not hasattr(self, '_ml_called') or not self._ml_called:
+            self.status.setText('Run ML basecalling first')
+            return
+        called = self._ml_called
+        quals = self._ml_quals
+        esd_seq = self._ml_raw_seq
+        esd_ident = getattr(self, '_ml_esd_identity', 0.0)
+        m13_ident = getattr(self, '_ml_m13_identity', 0.0)
+
+        dir_path = QFileDialog.getExistingDirectory(
+            self, 'Select save directory',
+            os.path.join(self.data_dir, self.current_well or ''))
+        if not dir_path:
+            return
+
+        # FASTA header carries the compare metrics so it is self-describing
+        # without opening the report file.
+        header = (f'>{well} ml-basecall conf~{int(np.mean(quals[quals >= 20])) if (quals >= 20).any() else 0} '
+                  f'vs_ESD={esd_ident:.1f}% vs_M13={m13_ident:.1f}% '
+                  f'esdlen={len(esd_seq)}')
+        fasta_path = os.path.join(dir_path, f'{well}_ml.fasta')
+        report_path = os.path.join(dir_path, f'{well}_ml_report.txt')
+        with open(fasta_path, 'w') as f:
+            f.write(header + '\n')
+            for i in range(0, len(called), 80):
+                f.write(called[i:i + 80] + '\n')
+
+        # Alignment report: three-letter rows for the full ML call vs M13 (the
+        # true reference) and ML vs ESD, so disagreements are visible.
+        q13 = ''.join(c for c in called if c in 'ACGT')
+        m13_result = self._align_to_m13(q13)
+        with open(report_path, 'w') as f:
+            f.write(f'{well} ML basecall comparison report\n')
+            f.write(f'called bases: {len(called)} (ESD len {len(esd_seq)}) '
+                    f'avg conf: {int(np.mean(quals[quals >= 20])) if (quals >= 20).any() else 0}\n'
+                    f'vs ESD NW identity: {esd_ident:.1f}%\n')
+            f.write(f'vs M13 NW identity: {m13_ident:.1f}%\n')
+            if m13_result:
+                f.write(f'M13 aligned: matches={m13_result["matches"]} '
+                        f'len={m13_result["alignment_length"]}\n')
+            f.write('\nML call quality (position|base|conf):\n')
+            for i in range(len(called)):
+                f.write(f'{i + 1}\t{called[i]}\t{quals[i]}\n')
+        self.status.setText(
+            f'Exported ML FASTA: {fasta_path} (+ report {report_path})')
 
     @staticmethod
     def _align_to_m13(query, ref=None):

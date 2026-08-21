@@ -51,3 +51,8 @@ overnight_*.json
 
 # Temp / duplicate copies
 *kopi*
+99_archive/
+wineprefix/
+winedll/
+wine_out/
+*.npz.bak

@@ -1,17 +1,1 @@
-WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-I0000 00:00:1782997988.374922 1681269 cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
-WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-I0000 00:00:1782997990.222677 1681269 cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
-Found 96 wells
-Train: 72, Val: 12, Test: 12
-
-=== Loading training data ===
-  Loaded 57627 windows from 72 wells (M13 reference)
-X_train: 46105, X_val: 5761
-Classes: train=[11573 11532 13171  9829     0], val=[1446 1441 1646 1228    0]
-
-============================================================
-PHASE 1: TRAINING 5 ARCHITECTURES
-============================================================
-
---- Training cnn_std ---
+02_denovo_cnn_ensemble_91.53pct/ensemble_training.log

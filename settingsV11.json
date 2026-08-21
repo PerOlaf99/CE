@@ -1,7 +1,7 @@
 {
   "basecall_method": 0,
   "baseline_method": "AsyLS",
-  "baseline_window": 50010,
+  "baseline_window": 50000,
   "baseline_window2": 1,
   "esd_offset": 2008,
   "esd_variant": "Cp312",

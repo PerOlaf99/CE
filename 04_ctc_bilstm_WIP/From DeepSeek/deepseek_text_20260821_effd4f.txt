@@ -1,0 +1,7 @@
+project/
+├── data/
+│   ├── raw/          # .rsd files (e.g., A01.rsd ... D12.rsd)
+│   └── called/       # .esd files (same names, e.g., A01.esd ...)
+├── train_model.py    # training script
+├── predict.py        # inference script
+└── utils.py          # helper functions
