@@ -1,0 +1,57 @@
+{
+  "basecall_method": 0,
+  "baseline_method": "Rolling Minimum",
+  "baseline_window": 125,
+  "baseline_window2": 1,
+  "esd_offset": 2008,
+  "esd_variant": "Cp312",
+  "fill_gap": 3,
+  "fill_in": true,
+  "fill_margin": 1.0,
+  "matrix": [
+    [
+      1.0,
+      1.0,
+      0.26,
+      0.43
+    ],
+    [
+      0.07,
+      1.0,
+      0.075,
+      0.006
+    ],
+    [
+      0.38,
+      0.33,
+      1.0,
+      1.52
+    ],
+    [
+      0.27,
+      0.26,
+      0.189,
+      1.0
+    ]
+  ],
+  "matrix_apply_point": "smoothed",
+  "min_distance": 5.0,
+  "min_signal_frac": 1.0,
+  "mobility_shifts": [
+    5,
+    11,
+    10,
+    10
+  ],
+  "norm_window": 200,
+  "prominence_frac": 0.05,
+  "reference_dna": "",
+  "reference_end": 6300,
+  "reference_name": "M13 M77815.1",
+  "reference_start": 5300,
+  "smooth_method": "Butterworth",
+  "smooth_order": 1,
+  "smooth_window": 7,
+  "tolerance": 3,
+  "well": "A01"
+}
