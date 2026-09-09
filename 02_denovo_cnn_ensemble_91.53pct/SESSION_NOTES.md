@@ -17,6 +17,28 @@ Build a de-novo basecaller for capillary electropherograms that beats the DICTAT
    correct there and is the back-up**.
 
 ## Progress log (latest first)
+- **2026-09-09 (plate-wide validation — A01 win does NOT generalize):**
+  - Called `call_guided` on all 96 wells (both `.rsd` + `.esd`); diff vs M13 via
+    local blastn per well (script `/tmp/opencode/plate_eval.py`, results CSV
+    `/tmp/opencode/plate_results.csv`).
+  - **guided: mean 733.2 matched / 95.74% identity / 87.8% cov.**
+    **ESD:   mean 753.6 matched / 96.84% identity / 89.2% cov.**
+    Guided beats ESD on only **16/96** wells (ties 4, loses 76). Unless the
+    per-well "true" mutation differs from the ESD, the A01 improvement is a
+    luck-of-the-sample effect, not a general win.
+  - Failure-mode triage (difflib guided-vs-ESD per well): bad wells are
+    dominated by **long indel/gap runs** (e.g. C02 ~626-683, C10 ~367-493,
+    G11 ~400-433) — microsatellite/compression regions, NOT single-base CNN
+    errors. Good wells (B10, D06, H12) have <25 diff blocks. So "more data to
+    the CNN" would only fix the ~1/3 of errors that are SNP-ish; the dominant
+    gap-run failure mode is a **geometry/phasing** problem.
+  - Bug fixed while doing this: mutation `internal_mut` filter changed from
+    `30<=k<=n-40` to `100<=k<=n-200` and back up **all** internal mutation
+    windows (was: only first window, could pick front-noise idx ~30 and miss
+    the true ~300 mutation). Statistics unchanged, so not the cause of the gap.
+  - **Decision point for next session:** (a) retrain CNN with all 96 wells as
+    training data (helps SNP fraction only, ~27-40% of errors), or
+    (b) attack the indel-run/geometry failure mode directly (better ROI).
 - **2026-09-09 (final round + ML comparison):** Called `call_guided` with the
   parameter-optimization grid (smooth 3/5/7 x floors x tolerances + rescue pass):
   - clean-nearest peaks + CNN: 738-741/775 (95.0%), NCBI 1201

@@ -446,8 +446,9 @@ def call_guided(well, start_scan=3150.0, cnn=True, use_dll_geometry=True):
     dpos = np.asarray(cim.read_esd(os.path.join(GT, well + '.esd'))[
         'peak_positions'], dtype=np.float64)
     n = len(dpos)
-    internal_mut = [k for k in mut if 30 <= k <= n - 40]
+    internal_mut = [k for k in mut if 100 <= k <= n - 200]
     stats = {'n': n, 'mutation_index': internal_mut[0] if internal_mut else None,
+             'mutations': internal_mut,
              'mode': 'dll-geometry+cnn' if use_dll_geometry else 'nearest-clean',
              'report': ['D'] * n}
     k0 = int(np.argmin(np.abs(dpos - start_scan)))
@@ -470,9 +471,9 @@ def call_guided(well, start_scan=3150.0, cnn=True, use_dll_geometry=True):
     seq = cnn_seq(chraw, pos) if cnn else \
         ''.join('ACGT'[int(np.argmax(sep[p]))] for p in pos)
     seq = list(seq)
-    if stats['mutation_index'] is not None:
-        seq[stats['mutation_index']] = esd[stats['mutation_index']]
-        stats['report'][stats['mutation_index']] = 'M'
+    for k in internal_mut:
+        seq[k] = esd[k]
+        stats['report'][k] = 'M'
     return pos.tolist(), ''.join(seq), stats, k0
 
 
