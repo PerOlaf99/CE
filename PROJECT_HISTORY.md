@@ -1050,3 +1050,62 @@ ESD, far below GRAFT.  Remaining GRAFT errors = **6 tail bases** (scans
 - `sanger_toolkit/optimize_duplex.py` (new `--m13-idx` mode + workers fix)
 - `sanger_toolkit/od_whole{,_m13}.py`, `sanger_toolkit/ml_tail.py`
 - `sanger_toolkit/od_whole/`, `sanger_toolkit/od_whole_m13/`, per-duplex JSON
+
+---
+
+## 2026-09-10 — Duplex window-drift clamp + training data generator
+
+### Internal-control validation (all 96 wells read T at M13 coord 311)
+- M13.md had a stale base at coord 311 (C in the archive, T in the clone).  The
+  96-well consensus confirms T at 96/96 — this is a genuine C→T variant in the
+  construct and the **only** reference discrepancy in 827 bp.
+- The reference was already fixed (prior commit 0030f0a), but the old
+  M13-anchored duplex could still manufacture "CG" at that site by drifting
+  its window +48.5 scans to a coincidental match (ok=True).  This is the
+  **reference-anchoring bias**: the duplex objective gives +60 per base for
+  matching the target, and a tiny position penalty (-0.05/scan) lets the window
+  wander far from the anchor.
+
+### Drift clamp fix (optimize_duplex.py, plate_duplex_bench.py)
+- New module constants `MAX_DRIFT = 5.0` (default), `HARD_DRIFT = 8.0` (ceiling).
+  - `_decode_duplex`: window offset `off` clamped to `[-MAX_DRIFT, +MAX_DRIFT]`.
+  - `duplex_score`: position penalty raised from 0.05 to **1.0 per scan** of
+    peak drift; any drift > HARD_DRIFT returns -1e6 (reject outright).
+  - CLI: `--max-drift` (default 5.0, clamped to ≤8) available on
+    `optimize_duplex.py` and `plate_duplex_bench.py`.
+  - Every duplex JSON now stores `drift` = window offset from anchor.
+- Bench self-heal: on load, any cached row with |drift| > MAX_DRIFT is deleted
+  and recomputed with the clamped code (231/300 A01 caches need this).
+- Graft guard tightened: duplex override only if `ok AND |drift| <= MAX_DRIFT`.
+- Validation at coord 311 (esd_idx 308): window clamped to anchor (drift=0),
+  called='GG' ≠ target "CG", **ok=False** — the variant can no longer be faked.
+
+### Training data generator (sanger_toolkit/train_data_gen.py)
+- Per-base labeled samples for ML: matrix-deconvolved base-space window features
+  (per-channel max, top-2 heights, contrast, argmax, 2-peak geometry) + local
+  context (dL/dR spacing, local median spacing).
+- Labels: reference base with auto-detected variant overrides (plate-consensus
+  scan: coords where ≥95% wells agree on a base ≠ M13.md).  The C→T at coord
+  311 is applied; 9 other candidates found on 2-well subsample (full 96-well
+  scan recommended for production overrides).
+- Regions: head (<60), mid (60–769), tail (≥770), tail2 (≥800).
+- Duplex cache integration: --duplex-cache attaches ok/called/drift to meta;
+  `duplex_trusted` = ok AND |drift| ≤ MAX_DRIFT.
+- Smoke test: A01+B01 head+tail → 161 samples, 28 features, 4 classes.
+- Output: `sanger_toolkit/train_data/batch.npz` + `batch_meta.json`.
+
+### Key finding: duplex reference-bias is the core failure mode
+- The M13-anchored duplex is a shape-fitter: it matches the EXPECTED 2-mer by
+  drifting the window to a region that coincidentally prints the target.
+  This is exactly what the user warned: "inventing the M13 sequence from the
+  fasta instead of reading the peaks."
+- The drift clamp + steep position penalty fixes this at the objective level.
+- For downstream ML training: the `duplex_trusted` flag and the variant override
+  list ensure the training labels reflect PEAK reality, not reference fantasy.
+
+### Artifacts
+- `sanger_toolkit/optimize_duplex.py` — MAX_DRIFT clamp + duplex_score fix
+- `sanger_toolkit/plate_duplex_bench.py` — self-heal + graft guard + drift field
+- `sanger_toolkit/train_data_gen.py` — training data generator
+- `sanger_toolkit/m13_internal_controls.json` — uniform plate deviations
+- `sanger_toolkit/train_data/batch.npz` + `batch_meta.json` — smoke test output

@@ -46,6 +46,14 @@ from optimize_windows_esd import (load_well, decode, x0_from,
 MIN_WIN_LEN, MAX_WIN_LEN = 8.0, 160.0
 START_OFF = 40.0
 NORM_LIST = (1.0, 1.5, 1.0 / 1.5)
+# Window position fidelity: the duplex window center may stray at most MAX_DRIFT
+# scans from its expected anchor (hard ceiling HARD_DRIFT).  A window that drifts
+# farther is shape-fitting the WRONG part of the trace to manufacture a target
+# match (it invents the reference at true variants, e.g. clone C->T at coord
+# 311: M13 says C, all 96 wells read T, drifting duplex called "C").  So the
+# offset is clamped and the score rejects any window farther than HARD_DRIFT.
+MAX_DRIFT = 5.0
+HARD_DRIFT = 8.0
 
 _sep_cache = {}
 
@@ -91,9 +99,13 @@ def duplex_score(seq, pos, target, exp_scans):
     s0, s1 = exp_scans
     L = len(seq)
     if L == 2:
+        d0, d1 = abs(pos[0] - s0), abs(pos[1] - s1)
+        drift = max(d0, d1)
         sc = 20.0 + 60.0 * (seq[0] == t0) + 60.0 * (seq[1] == t1)
-        sc -= 0.05 * (abs(pos[0] - s0) + abs(pos[1] - s1))
+        sc -= 1.0 * (d0 + d1)                  # ~1 pt per scan of drift (was 0.05)
         sc -= 0.02 * abs((pos[1] - pos[0]) - (s1 - s0))
+        if drift > HARD_DRIFT:
+            return -1.0e6                      # drifting window: reject outright
         return max(sc, 0.0)
     if L == 0:
         return -60.0
@@ -196,7 +208,8 @@ def _decode_duplex(x, init_params, dfreeze, tune_matrix, base_end, greedy):
     sh = sh - round(float(sh.mean()))
     sh = np.clip(sh, -5, 5)
     p['mobility_shifts'] = [int(v) for v in sh]
-    win_off = _map1(x[gs + 4], -START_OFF, START_OFF)
+    win_off = np.clip(_map1(x[gs + 4], -START_OFF, START_OFF),
+                      -MAX_DRIFT, MAX_DRIFT)
     win_len = _map1(x[gs + 5], MIN_WIN_LEN, MAX_WIN_LEN)
     return p, win_off, win_len
 
@@ -238,10 +251,14 @@ def main():
     ap.add_argument('--no-greedy', action='store_true', help='keep greedy knobs + window dims only used by search... (dev)')
     ap.add_argument('--maxiter', type=int, default=30)
     ap.add_argument('--popsize', type=int, default=10)
+    ap.add_argument('--max-drift', type=float, default=5.0,
+                    help=f'max window drift from anchor in scans (hard cap {HARD_DRIFT})')
     ap.add_argument('--workers', type=int, default=1)
     ap.add_argument('--outdir', default=os.path.join(HERE, 'opt_duplex'))
     ap.add_argument('--seed', type=int, default=7)
     args = ap.parse_args()
+    global MAX_DRIFT
+    MAX_DRIFT = float(np.clip(args.max_drift, 1.0, HARD_DRIFT))
 
     raw, esd_seq, esd_pp = load_well(args.base_dir, args.well, args.esd_subdir)
     m13 = load_m13(args.ref)
@@ -314,7 +331,8 @@ def main():
         p['prominence_frac'] = _map1(x[gs + 1], 0.01, 0.60)
         p['norm_window'] = max(20.0, _map1(x[gs + 2], 20, 4000))
         p['min_distance_floor'] = max(1.0, _map1(x[gs + 3], 2.0, 7.0))
-        win_off = _map1(x[gs + 4], -START_OFF, START_OFF)
+        win_off = np.clip(_map1(x[gs + 4], -START_OFF, START_OFF),
+                          -MAX_DRIFT, MAX_DRIFT)
         win_len = _map1(x[gs + 5], MIN_WIN_LEN, MAX_WIN_LEN)
         return p, win_off, win_len
 
@@ -383,6 +401,8 @@ def main():
             'well': args.well, 'duplex': k + 1, 'anchor_scan': int(anchor),
             'window_start': int(region[0]), 'window_stop': int(region[1]),
             'window_len': int(region[1] - region[0]),
+            'window_center': int(round((region[0] + region[1]) / 2)),
+            'drift': int(round(s - anchor)),
             'expected': tgt, 'esd_target': esd_cross,
             'called': seq, 'called_pos': [int(v) for v in pos],
             'expected_scans': list(int(v) for v in exp_scans),
