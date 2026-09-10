@@ -24,7 +24,7 @@ Full-plate result (96 wells, measured before this file was restored):
   ours raw (de novo)       : 86.60%
   ours polished (ref-guid) : 100.00%   (+9.28 pts)
 """
-__version__ = '2.0'  # 2.0: v2 CNN (jitter+bg, honest holdout) in ensemble; ROOT-aware paths
+__version__ = '3.0'  # 3.0: v4 clean+pos CNN ensemble; position-adaptive refine
 import argparse, glob, os, sys
 import numpy as np
 
@@ -73,9 +73,8 @@ def load_ensemble(patterns):
     return models
 
 
-def cnn_probs(models, ch_raw, peak_scans):
+def _build_window(ch_raw, peak_scans, w):
     n = len(ch_raw)
-    w = WINDOW
     X = np.empty((len(peak_scans), 2 * w + 1, 4), dtype=np.float32)
     for k, s in enumerate(peak_scans):
         s = min(max(int(s), 0), n - 1)
@@ -87,14 +86,38 @@ def cnn_probs(models, ch_raw, peak_scans):
         X[k] = win
     mu = X.mean(axis=1, keepdims=True)
     sd = X.std(axis=1, keepdims=True) + 1e-8
-    X = ((X - mu) / sd).astype(np.float32)
-    probs = np.zeros((len(X), 4), dtype=np.float64)
+    return ((X - mu) / sd).astype(np.float32)
+
+
+def cnn_probs(models, ch_raw, peak_scans):
+    n_models = len(models)
+    if n_models == 0:
+        return np.zeros((len(peak_scans), 4), dtype=np.float64)
+    probs = np.zeros((len(peak_scans), 4), dtype=np.float64)
+    scans_arr = np.asarray(peak_scans, dtype=np.float32)
+    s_min, s_max = scans_arr.min(), scans_arr.max()
+    s_range = max(1.0, s_max - s_min)
+    pos_frac = ((scans_arr - s_min) / s_range).astype(np.float32)
+    cache = {}
     for m in models:
-        p = m.predict(X, verbose=0)
+        inp_len = m.input_shape[1] if hasattr(m, 'input_shape') and m.input_shape[1] else 2 * WINDOW + 1
+        w = (inp_len - 1) // 2
+        inp_ch = m.input_shape[-1] if hasattr(m, 'input_shape') else 4
+        key = (w, inp_ch)
+        if key not in cache:
+            X4 = _build_window(ch_raw, peak_scans, w)
+            if inp_ch == 5:
+                X5 = np.concatenate([X4, pos_frac[:, np.newaxis, np.newaxis] * np.ones(
+                    (len(X4), 2 * w + 1, 1), dtype=np.float32)], axis=2)
+                cache[key] = (X4, X5)
+            else:
+                cache[key] = (X4, X4)
+        X4, Xinp = cache[key]
+        p = m.predict(Xinp, verbose=0)
         if p.shape[1] == 5:
             p = p[:, :4]
         probs += p
-    probs /= max(1, len(models))
+    probs /= max(1, n_models)
     return probs
 
 
@@ -103,35 +126,100 @@ def phred(p):
     return min(60, max(1, int(round(-10 * np.log10(1 - p)))))
 
 
-def call_raw(rsd_path, models=None, refine=False, **engine_kw):
+def call_raw(rsd_path, models=None, refine=False, refine_v2=False,
+             hybrid=None, esd_path=None, gapcheck=False, **engine_kw):
     ch, scans = cim.read_rsd(rsd_path)
     eng = build_engine(**engine_kw)
     res = eng.call(ch, scans)
-    seq, conf, ps = [], [], []
+    esd_bases, conf, ps = [], [], []
     for base, pk in zip(res.sequence, res.peaks):
         if base in LABELS:
-            seq.append(base)
+            esd_bases.append(base)
             ps.append(int(round(pk.time)))
             conf.append(int(min(60, max(1, getattr(pk, 'quality', 20)))))
-    seq = ''.join(seq)
+    esd_seq = ''.join(esd_bases)
     conf = np.array(conf, dtype=np.int32)
+
+    if gapcheck:
+        from sanger_toolkit.gap_check import (
+            refine_with_gap_check, assign_bases_with_channels)
+        chw = np.asarray(ch, dtype=np.float64)
+        if chw.ndim == 2 and chw.shape[0] == 4 and chw.shape[0] <= chw.shape[1]:
+            chw = chw.T
+        env = chw.max(axis=1)
+        init_peaks = np.array(ps, dtype=np.int64)
+        result = refine_with_gap_check(env, init_peaks, init_sequence=esd_seq,
+                                       verbose=True)
+        gc_peaks = result['peaks']
+        gc_seq = assign_bases_with_channels(gc_peaks, chw)
+        # Score with CNN if available
+        if models:
+            probs = cnn_probs(models, chw, gc_peaks)
+            pred = probs.argmax(1)
+            gc_seq = ''.join(LABELS[i] for i in pred)
+            conf = np.array([phred(probs[k, pred[k]])
+                             for k in range(len(pred))], dtype=np.int32)
+        else:
+            conf = np.array([20] * len(gc_seq), dtype=np.int32)
+        return dict(seq=gc_seq, conf=conf, scans=gc_peaks,
+                    esd_len=len(esd_seq),
+                    n_inserted=result['n_inserted'],
+                    n_omitted=result['n_omitted'])
+
+    if hybrid is not None and esd_path and os.path.isfile(esd_path):
+        esd_data = cim.read_esd(esd_path)
+        esd_dll_seq = esd_data.get('sequence', '')
+        esd_dll_pos = esd_data.get('peak_positions', np.array([]))
+        if len(esd_dll_seq) > 0 and len(esd_dll_pos) > 0:
+            chw = np.asarray(ch, dtype=np.float64)
+            if chw.ndim == 2 and chw.shape[0] == 4 and chw.shape[0] <= chw.shape[1]:
+                chw = chw.T
+            probs = cnn_probs(models, chw, esd_dll_pos)
+            pmax = probs.max(1)
+            pred = probs.argmax(1)
+            seq = []
+            for k in range(len(esd_dll_seq)):
+                if pmax[k] < hybrid:
+                    seq.append(esd_dll_seq[k])
+                else:
+                    seq.append(LABELS[pred[k]])
+            seq = ''.join(seq)
+            conf = np.array([phred(probs[k, probs[k].argmax()])
+                             for k in range(len(seq))], dtype=np.int32)
+            return dict(seq=seq, conf=conf, scans=np.array(esd_dll_pos),
+                        esd_len=len(esd_dll_seq))
+
     if models:
         chw = np.asarray(ch, dtype=np.float64)
         if chw.ndim == 2 and chw.shape[0] == 4 and chw.shape[0] <= chw.shape[1]:
             chw = chw.T
         probs = cnn_probs(models, chw, ps)
-        pred = probs.argmax(1)
-        seq = ''.join(LABELS[i] for i in pred)
+        if hybrid is not None:
+            pmax = probs.max(1)
+            pred = probs.argmax(1)
+            seq = []
+            for k in range(len(esd_bases)):
+                if pmax[k] < hybrid:
+                    seq.append(esd_bases[k])
+                else:
+                    seq.append(LABELS[pred[k]])
+            seq = ''.join(seq)
+        else:
+            pred = probs.argmax(1)
+            seq = ''.join(LABELS[i] for i in pred)
         conf = np.array([phred(probs[k, i]) for k, i in enumerate(pred)],
                         dtype=np.int32)
-        if refine:
+        if refine_v2:
+            seq, conf, _ = refine_denovo_v2(models, chw, list(seq), list(conf),
+                                             np.asarray(ps))
+        elif refine:
             seq, conf, _ = refine_denovo(models, chw, list(seq), list(conf),
                                          np.asarray(ps))
     return dict(seq=seq, conf=conf, scans=np.array(ps), esd_len=len(res.sequence))
 
 
 def refine_denovo(models, ch_raw, seq, conf, scans,
-                  drop_p=0.70, add_p=0.68, gap_frac=1.25, iters=3, jitter=2):
+                  drop_p=0.50, add_p=0.68, gap_frac=1.25, iters=3, jitter=2):
     probs = cnn_probs(models, ch_raw, scans)
     pmax = probs.max(1)
     pred = probs.argmax(1)
@@ -176,6 +264,110 @@ def refine_denovo(models, ch_raw, seq, conf, scans,
             break
     conf = np.full(len(seq), phred(add_p), dtype=np.int32)
     return ''.join(seq), conf, sc_arr
+
+
+def stutter_merge(seq, scans, conf, gap_frac=0.55, p_t=0.60):
+    """Collapse same-base runs with sub-median spacing (polymerase stutter)."""
+    seq = list(seq)
+    scans = [int(s) for s in scans]
+    conf = [int(c) for c in conf]
+    med = float(np.median(np.diff(scans))) if len(scans) > 2 else 10.0
+    out_s, out_p, out_c = [], [], []
+    k = 0
+    while k < len(seq):
+        if k + 1 < len(seq) and seq[k + 1] == seq[k] and \
+                (scans[k + 1] - scans[k]) < gap_frac * med:
+            a, b = k, k + 1
+            strong, weak = (a, b) if conf[a] >= conf[b] else (b, a)
+            pm_weak = 1.0 - 10 ** (-conf[weak] / 10.0)
+            if pm_weak < p_t:
+                out_s.append(seq[strong])
+                out_p.append(scans[strong])
+                out_c.append(conf[strong])
+                k += 2
+                continue
+        out_s.append(seq[k])
+        out_p.append(scans[k])
+        out_c.append(conf[k])
+        k += 1
+    return ''.join(out_s), out_p, out_c
+
+
+def refine_denovo_v2(models, ch_raw, seq, conf, scans,
+                     drop_p_hi=0.55, drop_p_lo=0.40, add_p=0.55,
+                     gap_frac=1.15, iters=4, jitter=3,
+                     stutter_gap=0.50, stutter_p=0.55):
+    """Position-adaptive refine with stutter merge and two-pass cleanup.
+
+    drop_p_hi/lo: linearly interpolated across read length.
+      Q1 (start): drop_p_hi, Q4 (tail): drop_p_lo.
+    """
+    probs = cnn_probs(models, ch_raw, scans)
+    pmax = probs.max(1)
+    pred = probs.argmax(1)
+    n = len(scans)
+    if n == 0:
+        return '', np.array([], dtype=np.int32), np.array([], dtype=np.int32)
+    scan_min, scan_max = scans[0], scans[-1]
+    scan_range = max(1, scan_max - scan_min)
+
+    def adaptive_drop_p(s):
+        frac = (s - scan_min) / scan_range
+        return drop_p_hi + (drop_p_lo - drop_p_hi) * frac
+
+    keep = np.array([pmax[i] >= adaptive_drop_p(scans[i]) for i in range(n)])
+    seq = [b for b, k in zip(seq, keep) if k]
+    sc_arr = np.asarray([s for s, k in zip(scans, keep) if k])
+
+    for _ in range(iters):
+        if len(sc_arr) < 3:
+            break
+        med = float(np.median(np.diff(sc_arr)))
+        cands = []
+        for a, b in zip(sc_arr[:-1], sc_arr[1:]):
+            gap = b - a
+            if gap < gap_frac * med:
+                continue
+            need = max(0, int(round(gap / med)) - 1)
+            for j in range(1, need + 1):
+                c0 = int(a + round(gap * j / (need + 1)))
+                cands.extend(range(c0 - jitter, c0 + jitter + 1))
+        added = 0
+        if cands:
+            uniq = sorted(set(cands))
+            cp = cnn_probs(models, ch_raw, uniq)
+            cm = {s: (cp[k].max(), cp[k].argmax()) for k, s in enumerate(uniq)}
+            for a, b in zip(sc_arr[:-1], sc_arr[1:]):
+                gap = b - a
+                if gap < gap_frac * med:
+                    continue
+                need = max(0, int(round(gap / med)) - 1)
+                for j in range(1, need + 1):
+                    c0 = int(a + round(gap * j / (need + 1)))
+                    best_s, (best_p, best_b) = max(
+                        ((s, cm[s]) for s in range(c0 - jitter, c0 + jitter + 1)
+                         if s in cm), key=lambda t: t[1][0],
+                        default=(None, (0.0, 0)))
+                    if best_s is not None and best_p >= add_p:
+                        idx = np.searchsorted(sc_arr, best_s)
+                        seq.insert(idx, LABELS[best_b])
+                        sc_arr = np.insert(sc_arr, idx, best_s)
+                        added += 1
+        if added == 0:
+            break
+
+    # Stutter merge: collapse same-base runs with sub-median spacing
+    if len(sc_arr) > 2:
+        probs_final = cnn_probs(models, ch_raw, list(sc_arr))
+        conf_arr = np.array([phred(probs_final[i].max())
+                             for i in range(len(seq))], dtype=np.int32)
+        seq_m, sc_m, _ = stutter_merge(
+            list(seq), list(sc_arr), list(conf_arr),
+            gap_frac=stutter_gap, p_t=stutter_p)
+        seq = list(seq_m)
+        sc_arr = np.asarray(sc_m, dtype=np.int64)
+    conf_out = np.full(len(seq), phred(add_p), dtype=np.int32)
+    return ''.join(seq), conf_out, sc_arr
 
 
 def polish(seq, conf, ref, mismatch_phred=25, indel_phred=20):
@@ -228,11 +420,22 @@ def main():
     ap.add_argument('--gt', default=os.path.join(
         ROOT, 'ground_truth', 'MB1000_M13_DT_Cp312_MD1'))
     ap.add_argument('--models', nargs='*',
-                    default=[os.path.join(HERE, 'base_caller_model*.keras')])
+                    default=[os.path.join(HERE, f) for f in [
+                        'base_caller_model_v4_clean.keras',
+                        'base_caller_model_v4_pos.keras',
+                        'base_caller_model_v4_pos_b.keras']])
     ap.add_argument('--no-ref', action='store_true',
                     help='skip polishing stage')
     ap.add_argument('--refine', action='store_true',
                     help='de-novo gap-fill / junk-drop refinement pass')
+    ap.add_argument('--refine-v2', action='store_true',
+                    help='position-adaptive refine with stutter merge')
+    ap.add_argument('--hybrid', type=float, default=None, metavar='THRESH',
+                    help='hybrid mode: fall back to ESD when CNN pmax < THRESH')
+    ap.add_argument('--esd', default=None,
+                    help='path to Cimarron ESD file (for hybrid with DLL peaks)')
+    ap.add_argument('--gapcheck', action='store_true',
+                    help='use GapCheck fuzzy-logic peak refinement (no ESD needed)')
     ap.add_argument('--mismatch-phred', type=int, default=25)
     ap.add_argument('--indel-phred', type=int, default=20)
     ap.add_argument('--out')
@@ -244,7 +447,8 @@ def main():
     print(f'ensemble models: {len(models)}')
 
     if args.rsd:
-        r = call_raw(args.rsd, models, refine=args.refine)
+        r = call_raw(args.rsd, models, refine=args.refine, refine_v2=args.refine_v2,
+                     hybrid=args.hybrid, gapcheck=args.gapcheck, esd_path=args.esd)
         pol, nfix = polish(r['seq'], r['conf'], ref,
                            args.mismatch_phred, args.indel_phred) if ref else (r['seq'], 0)
         print(f'{os.path.basename(args.rsd)}: raw={len(r["seq"])}b '
@@ -269,7 +473,9 @@ def main():
     for w in wells:
         esd = cim.read_esd(os.path.join(args.gt, w + '.esd'))['sequence']
         r = call_raw(os.path.join(args.plate, w + '.rsd'), models,
-                     refine=args.refine)
+                     refine=args.refine, refine_v2=args.refine_v2,
+                     hybrid=args.hybrid, gapcheck=args.gapcheck,
+                     esd_path=os.path.join(args.gt, w + '.esd'))
         raw_acc = perbase_vs_ref(r['seq'], ref) if ref else float('nan')
         if ref:
             pol, _ = polish(r['seq'], r['conf'], ref,

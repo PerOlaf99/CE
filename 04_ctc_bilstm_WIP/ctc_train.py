@@ -99,11 +99,15 @@ def load_well(well):
 def make_model():
     import tensorflow as tf
     inp = tf.keras.layers.Input(shape=(None, 4))
+    # NOTE: NO softmax activation. tf.nn.ctc_loss takes RAW LOGITS and does
+    # the softmax internally. A 'softmax' activation here is a DOUBLE softmax
+    # (the second softmax flattens the output toward uniform, stalling the
+    # loss at the ln(6)*L uniform-posterior fixed point we observed).
     x = tf.keras.layers.Bidirectional(
         tf.keras.layers.LSTM(128, return_sequences=True))(inp)
     x = tf.keras.layers.Bidirectional(
         tf.keras.layers.LSTM(128, return_sequences=True))(x)
-    out = tf.keras.layers.Dense(6, activation='softmax')(x)
+    out = tf.keras.layers.Dense(6)(x)  # raw logits
     m = tf.keras.models.Model(inp, out)
 
     def ctc_loss(y_true, y_pred):

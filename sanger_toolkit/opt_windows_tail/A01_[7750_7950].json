@@ -1,0 +1,61 @@
+{
+  "well": "A01",
+  "region_start": 7750,
+  "region_stop": 7950,
+  "baseline_method": "airPLS",
+  "baseline_window": 50654,
+  "baseline_window2": 40,
+  "smooth_method": "LOWESS",
+  "smooth_window": 93,
+  "smooth_order": 2,
+  "matrix_apply_point": "smoothed",
+  "mobility_shifts": [
+    5,
+    -1,
+    6,
+    6
+  ],
+  "matrix": [
+    [
+      0.3962715856547594,
+      0.028462718889104184,
+      0.2722096673301608,
+      0.11736214854165777
+    ],
+    [
+      0.10161765389969397,
+      0.8889953963324937,
+      0.2722096673301608,
+      0.1248533495124019
+    ],
+    [
+      0.2570328892756965,
+      0.04127094238920106,
+      0.2163661092010524,
+      0.0724149427171931
+    ],
+    [
+      0.24507787116985014,
+      0.04127094238920106,
+      0.23921455613862613,
+      0.6853695592287472
+    ]
+  ],
+  "esd_offset": 2008,
+  "esd_variant": "Cp312",
+  "basecall_method": 0,
+  "min_distance": 1.449212745639025,
+  "prominence_frac": 0.1241821500746696,
+  "norm_window": 2579,
+  "min_distance_floor": 2.4605466621638903,
+  "fill_gap": 4,
+  "fill_margin": 0.2,
+  "fill_in": true,
+  "band_low": 0,
+  "band_high": 0,
+  "band_order": 2,
+  "esd_matches": 27,
+  "esd_aln": 33,
+  "esd_ident_pct": 81.82,
+  "optimized_score": 27.0
+}

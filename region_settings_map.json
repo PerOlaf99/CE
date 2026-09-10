@@ -1,0 +1,29 @@
+{
+  "A01:5300:5800": {
+    "local_norm_window": 200,
+    "local_norm_percentile": 88,
+    "baseline_window": 101,
+    "smoothing_window": 4,
+    "tail_min_prominence": 0.025,
+    "head_min_prominence": 0.04,
+    "position_adaptive_spectral": true
+  },
+  "A01:5800:6300": {
+    "local_norm_window": 200,
+    "local_norm_percentile": 88,
+    "baseline_window": 101,
+    "smoothing_window": 1,
+    "tail_min_prominence": 0.025,
+    "head_min_prominence": 0.04,
+    "position_adaptive_spectral": true
+  },
+  "A01:6300:6800": {
+    "local_norm_window": 200,
+    "local_norm_percentile": 88,
+    "baseline_window": 101,
+    "smoothing_window": 4,
+    "tail_min_prominence": 0.025,
+    "head_min_prominence": 0.04,
+    "position_adaptive_spectral": true
+  }
+}

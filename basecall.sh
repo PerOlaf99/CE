@@ -10,6 +10,7 @@ R="$(cd "$(dirname "$0")" && pwd)"
 cmd="${1:-}"; shift || true
 case "$cmd" in
   denovo)          exec python3 "$R/02_denovo_cnn_ensemble_91.53pct/perfect_basecaller.py" "$@" ;;
+  view)            exec python3 "$R/02_denovo_cnn_ensemble_91.53pct/view_denovo.py" "$@" ;;
   polished|polish) exec python3 "$R/01_polished_100.00pct/run_polish.py" "$@" ;;
   cimarron)        exec python3 "$R/03_cimarron312_dll_90.72pct/call_cimarron.py" "$@" ;;
   *) sed -n '2,9p' "$0"; exit 1 ;;

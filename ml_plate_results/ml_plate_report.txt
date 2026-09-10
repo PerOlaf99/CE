@@ -1,0 +1,18 @@
+ML plate run (2026-09-10)
+wells attempted: 96   finished: 96   elapsed: 4.9 min
+
+vs ESD : mean 94.6  median 95.8  min 83.6  max 98.8
+vs M13 : mean 86.9  median 87.3  min 78.3  max 91.8
+
+worst 5 by vs M13:
+  C10: vs_M13 78.3  vs_ESD 83.9
+  C07: vs_M13 78.9  vs_ESD 86.9
+  G11: vs_M13 79.3  vs_ESD 83.6
+  C02: vs_M13 79.4  vs_ESD 84.3
+  F02: vs_M13 81.2  vs_ESD 87.8
+best 5 by vs M13:
+  A01: vs_M13 91.8  vs_ESD 98.3
+  A06: vs_M13 90.8  vs_ESD 95.7
+  H07: vs_M13 90.7  vs_ESD 97.9
+  G05: vs_M13 90.4  vs_ESD 97.3
+  D01: vs_M13 90.2  vs_ESD 97.1

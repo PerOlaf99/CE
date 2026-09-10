@@ -1,31 +1,14 @@
 #!/usr/bin/env python3
-"""Sequencing basecaller GUI V10 — single self-contained file.
+"""Sequencing basecaller GUI V15 — modular version.
 
-Merges dsp_core.py, peak_calling.py, and sequencing_gui_V9.py (Claude/030826)
-into one runnable file. No sibling modules required beyond the standard
-extract_training_data.py parser already on the well-known path.
-
-New in V10 vs V9:
-  * FFT Lowpass smoothing method (frequency-domain notch/null with cosine taper)
-  * dominant_periodicities() diagnostic to spot periodic noise before smoothing
-  * Independent peak-call button (finds its own peaks via scipy.find_peaks,
-    no reliance on ESD's peak_positions) compared against M13/ESD via
-    Needleman-Wunsch alignment
-  * Auto mobility shift estimation via cross-correlation of channel envelopes
-    (only valid on calibration-standard runs — caveated in the docstring)
-  * optimize_params.py integration (shells out to differential-evolution search)
-  * All math lives in pure functions (dsp_* / pc_* prefixes) so it is
-    identical whether driven by the GUI or by the headless optimizer.
+Core DSP, basecalling, and alignment logic lives in separate modules
+(constants.py, dsp.py, basecall.py, align.py).  This file contains only
+the PyQt5 GUI classes, the OptimizerWorker thread, and the ReferenceDialog.
 """
 import sys, os, struct, json, subprocess, tempfile
 import numpy as np
-from scipy.ndimage import (
-    minimum_filter1d, gaussian_filter1d, median_filter,
-    maximum_filter1d, grey_opening, uniform_filter1d,
-)
-from scipy.sparse import diags as sparse_diags
-from scipy.sparse.linalg import spsolve
-from scipy.signal import savgol_filter, find_peaks
+
+import multiview_peakdetect as mvpd
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -50,1858 +33,37 @@ try:
 except Exception:
     _cimarron_bgn_end = None
 
+# ── Import from new modules ────────────────────────────────────────────
+from constants import (
+    CHAN_COLORS, BASE_LETTERS, CHEM_MAP, IUPAC_CODES,
+    DEFAULT_SPEC_MATRIX, _TUNED_SSM, OFF_PATTERN,
+    BASELINE_METHODS, SMOOTH_METHODS,
+    SMOOTH_PARAM_CONFIG, SMOOTH_TOOLTIPS,
+    SMOOTH_PARAM1_TOOLTIPS, SMOOTH_PARAM2_TOOLTIPS,
+    BASELINE_PARAM_CONFIG, METRIC_TOOLTIPS,
+)
+from dsp import (
+    find_esd_subdirs, make_matrix_from_diagonals,
+    dsp_shift_channel, dsp_apply_mobility_shifts, dsp_full_pipeline,
+    dsp_compute_baseline, dsp_smooth_signal, dsp_separate_channels,
+    dsp_dominant_periodicities,
+)
+from basecall import (
+    pc_normalize_peaks, pc_normalize_display,
+    pc_detect_peaks_4ch, pc_call_bases,
+    pc_signal_onset, pc_signal_region,
+    pc_call_bases_with_shifts, pc_call_bases_greedy,
+    pc_fill_in_combined_peaks, pc_fill_in_shoulders,
+    pc_lifetrace_peaks_shape, pc_lifetrace_transform,
+    pc_lifetrace_basecall, pc_hybrid_basecall,
+    pc_estimate_mobility_shifts,
+)
+from align import (
+    pc_nw_identity, pc_reference_accuracy,
+    ref_semiglobal_identity, ref_local_identity, _ref_revcomp,
+)
+
 DEFAULT_DATA_DIR = "/media/tv/78B0C7DE1FA7081C/electropherogram/MB1000_M13_DT"
-CHAN_COLORS = ['red', 'green', 'blue', 'orange']
-BASE_LETTERS = {0: 'T', 1: 'G', 2: 'C', 3: 'A'}
-CHEM_MAP = {0: 'T', 1: 'G', 2: 'C', 3: 'A'}
-
-IUPAC_CODES = {
-    frozenset({'A'}): 'A', frozenset({'C'}): 'C',
-    frozenset({'G'}): 'G', frozenset({'T'}): 'T',
-    frozenset({'A', 'C'}): 'M',
-    frozenset({'A', 'G'}): 'R',
-    frozenset({'A', 'T'}): 'W',
-    frozenset({'C', 'G'}): 'S',
-    frozenset({'C', 'T'}): 'Y',
-    frozenset({'G', 'T'}): 'K',
-    frozenset({'A', 'C', 'G'}): 'V',
-    frozenset({'A', 'C', 'T'}): 'H',
-    frozenset({'A', 'G', 'T'}): 'D',
-    frozenset({'C', 'G', 'T'}): 'B',
-    frozenset({'A', 'C', 'G', 'T'}): 'N',
-}
-
-DEFAULT_SPEC_MATRIX = np.array([
-    [0.85, 0.03, 0.05, 0.07],
-    [0.02, 0.88, 0.04, 0.06],
-    [0.06, 0.04, 0.86, 0.04],
-    [0.07, 0.05, 0.05, 0.83],
-], dtype=np.float64)
-
-# Validated tuned crosstalk matrix for the Cimarron (tuned) basecall method
-# (from A01_settings.json; the configuration that reached ~95% identity vs
-# the true M13 reference). Used only when the user has not customized the
-# matrix grid away from the factory default.
-_TUNED_SSM = np.array([
-    [1.0, 1.00, 0.26, 0.46],
-    [0.07, 1.00, 0.075, 0.006],
-    [0.38, 0.33, 1.00, 1.52],
-    [0.27, 0.26, 0.189, 1.00],
-], dtype=np.float64)
-
-OFF_PATTERN = np.array([
-    [0.00, 0.20, 0.33, 0.47],
-    [0.17, 0.00, 0.33, 0.50],
-    [0.43, 0.29, 0.00, 0.29],
-    [0.41, 0.29, 0.29, 0.00],
-], dtype=np.float64)
-
-BASELINE_METHODS = [
-    'None', 'Rolling Minimum', 'Rolling Median', 'ALS', 'airPLS', 'SNIP',
-    'Morphological (Top-hat)', 'Polynomial Detrend',
-    'Rubberband', 'AsyLS', 'arPLS', 'Flat Offset (200-1200)',
-    'Noise Offset (pre-1500)',
-]
-
-SMOOTH_METHODS = [
-    'Savitzky-Golay', 'Gaussian', 'Moving Avg', 'Median', 'Whittaker',
-    'Butterworth', 'Wavelet', 'LOWESS', 'FFT Lowpass',
-]
-
-SMOOTH_PARAM_CONFIG = {
-    'Savitzky-Golay': ('Window:', (3, 51), 'Order:', (1, 20)),
-    'Gaussian':       ('Window:', (3, 51), 'Sigma:', (1, 20)),
-    'Moving Avg':     ('Window:', (3, 51), 'Order:', (1, 20)),
-    'Median':         ('Window:', (3, 51), 'Order:', (1, 20)),
-    'Whittaker':      ('Lambda:', (100, 100000), 'Order:', (1, 20)),
-    'Butterworth':    ('Cutoff period:', (3, 500), 'Order:', (1, 10)),
-    'Wavelet':        ('Level:', (1, 8), 'Thresh x100:', (10, 300)),
-    'LOWESS':         ('Frac x1000:', (1, 500), 'Iterations:', (0, 5)),
-    'FFT Lowpass':    ('Cutoff period:', (3, 500), 'Taper %:', (0, 50)),
-}
-
-SMOOTH_TOOLTIPS = {
-    'Savitzky-Golay': (
-        'Savitzky-Golay: fits a polynomial to each sliding window and '
-        'evaluates it at the centre point, preserving peak shape and height '
-        'better than simple averaging. Window = fit width (odd, must be > '
-        'order + 1); Order = polynomial degree (2 is a good default; higher '
-        'follows faster changes but keeps more noise). The best default for '
-        'Sanger traces.'),
-    'Gaussian': (
-        'Gaussian: convolves the trace with a Gaussian kernel, the classic '
-        'smooth low-pass filter. Window = truncation radius in units of '
-        'sigma (how far the kernel extends); Sigma = kernel width. Larger '
-        'sigma = stronger smoothing, but narrow peaks get rounded.'),
-    'Moving Avg': (
-        'Moving Average: replaces each sample with the mean of its window '
-        'neighbours - simple and fast, but blunts peak tops and edges. '
-        'Window = number of samples averaged (odd, typical 5-11). The '
-        'Order control is not used by this method.'),
-    'Median': (
-        'Median: replaces each sample with the median of its window - very '
-        'robust to single-sample spikes and salt-and-pepper noise, but '
-        'distorts peak shape more than Savitzky-Golay. Window = median '
-        'filter size (made odd automatically). The Order control is not '
-        'used.'),
-    'Whittaker': (
-        'Whittaker (penalized least squares): fits a smooth curve by '
-        'balancing fidelity to the data against roughness. Excellent '
-        'baseline-free smoothing with no window artifacts, but slower on '
-        'long reads. Lambda = smoothness penalty (larger = smoother). The '
-        'Order control is not used.'),
-    'Butterworth': (
-        'Butterworth: low-pass IIR filter with a flat passband and no '
-        'ripple, applied zero-phase (filtfilt). Cutoff period = smoothing '
-        'cutoff wavelength in scans (larger = smoother); Order = filter '
-        'steepness (1-10).'),
-    'Wavelet': (
-        'Wavelet denoising: decomposes the trace and thresholds the detail '
-        'coefficients, preserving sharp peak edges while removing noise. '
-        'Level = wavelet decomposition depth (1-8); Thresh x100 = threshold '
-        'strength. Requires PyWavelets (pywt).'),
-    'LOWESS': (
-        'LOWESS: locally weighted polynomial regression - a robust, '
-        'adaptive smoother that handles varying peak density well, but is '
-        'the slowest method. Frac x1000 = fraction of the trace used per '
-        'fit point (larger = smoother); Iterations = robust refits (0-5). '
-        'Requires statsmodels.'),
-    'FFT Lowpass': (
-        'FFT Lowpass: removes high-frequency noise by zeroing the Fourier '
-        'components above the cutoff, with a tapered roll-off to avoid '
-        'ringing. Cutoff period = shortest period kept in scans (larger = '
-        'smoother); Taper % = softness of the cutoff transition (0-50).'),
-}
-
-SMOOTH_PARAM1_TOOLTIPS = {
-    'Savitzky-Golay': 'Window: fit width in scans. Must be odd and larger '
-                      'than Order + 1. Typical 5-11.',
-    'Gaussian':       'Window: kernel truncation radius, in units of Sigma '
-                      '(how far the Gaussian extends).',
-    'Moving Avg':     'Window: number of samples averaged together. Odd only; '
-                      'typical 5-11.',
-    'Median':         'Window: median filter size (forced odd).',
-    'Whittaker':      'Lambda: smoothness penalty of the penalized-least-'
-                      'squares fit. Larger = smoother.',
-    'Butterworth':    'Cutoff period: smoothing cutoff wavelength in scans. '
-                      'Larger = smoother.',
-    'Wavelet':        'Level: wavelet decomposition depth (1-8). Deeper '
-                      'thresholds more detail bands.',
-    'LOWESS':         'Frac x1000: fraction of the trace used for each local '
-                      'fit point. Larger = smoother.',
-    'FFT Lowpass':    'Cutoff period: shortest period kept, in scans. Larger '
-                      '= smoother.',
-}
-
-SMOOTH_PARAM2_TOOLTIPS = {
-    'Savitzky-Golay': 'Order: polynomial degree of the fit. Must be less '
-                      'than Window. 2 is a good default.',
-    'Gaussian':       'Sigma: Gaussian kernel width. Larger = smoother but '
-                      'narrow peaks get rounded.',
-    'Moving Avg':     'Not used by this method.',
-    'Median':         'Not used by this method.',
-    'Whittaker':      'Not used by this method.',
-    'Butterworth':    'Order: low-pass filter steepness (1-10).',
-    'Wavelet':        'Thresh x100: denoising threshold strength '
-                      '(10-300, i.e. 0.10-3.00).',
-    'LOWESS':         'Iterations: number of robust refits (0-5). More is '
-                      'more robust but slower.',
-    'FFT Lowpass':    'Taper %: softness of the cutoff transition (0-50). '
-                      'More taper = less ringing.',
-}
-
-BASELINE_PARAM_CONFIG = {
-    'None':                     ('None', (20, 1000), None, None),
-    'Rolling Minimum':          ('Window:', (20, 1000), None, None),
-    'Rolling Median':           ('Window:', (20, 1000), None, None),
-    'ALS':                      ('Lambda:', (20, 100000), 'Asymmetry x100:', (1, 100)),
-    'airPLS':                   ('Lambda:', (20, 100000), 'Max iters:', (5, 50)),
-    'SNIP':                     ('Iterations:', (5, 500), None, None),
-    'Morphological (Top-hat)':  ('Window:', (3, 1000), None, None),
-    'Polynomial Detrend':       ('Order:', (1, 15), None, None),
-    'Rubberband':               ('Smooth win:', (3, 101), None, None),
-    'AsyLS':                    ('Lambda:', (20, 100000), 'Asymmetry x100:', (1, 100)),
-    'arPLS':                    ('Lambda:', (20, 100000), 'Max iters:', (5, 200)),
-    'Flat Offset (200-1200)':   ('Start scan:', (100, 2000), 'End scan:', (300, 4000)),
-    'Noise Offset (pre-1500)':  ('Noise start:', (0, 500), 'Noise end:', (500, 3000)),
-}
-
-
-def find_esd_subdirs(base_dir):
-    dirs = {}
-    for d in sorted(os.listdir(base_dir)):
-        dp = os.path.join(base_dir, d)
-        if os.path.isdir(dp) and d.endswith('_MD1'):
-            name = d.replace('MB1000_M13_DT_', '').replace('_MD1', '')
-            dirs[name] = d
-    return dirs
-
-
-def make_matrix_from_diagonals(diag):
-    """Build 4x4 mixing matrix from 4 diagonal values.
-    Off-diagonals follow DEFAULT pattern scaled to (1-diag) total bleed."""
-    mix = np.zeros((4, 4), dtype=np.float64)
-    for col in range(4):
-        bleed = 1.0 - diag[col]
-        pattern = OFF_PATTERN[:, col].copy()
-        pattern[col] = 0
-        psum = pattern.sum()
-        if psum > 0:
-            pattern = pattern / psum * bleed
-        pattern[col] = diag[col]
-        mix[:, col] = pattern
-    return mix
-
-
-# ---------------------------------------------------------------------------
-# dsp_core: Signal Processing Core (inlined from dsp_core.py)
-# ---------------------------------------------------------------------------
-def dsp_shift_channel(arr, shift):
-    """Shift a 1-D array by ``shift`` scans, padding with the edge value
-    instead of wrapping. Positive shift delays (peaks move right); negative
-    advances (peaks move left)."""
-    n = len(arr)
-    shift = int(np.clip(shift, -(n - 1), n - 1))
-    if shift == 0:
-        return arr.copy()
-    out = np.empty_like(arr)
-    if shift > 0:
-        out[:shift] = arr[0]
-        out[shift:] = arr[:-shift]
-    else:
-        k = -shift
-        out[-k:] = arr[-1]
-        out[:-k] = arr[k:]
-    return out
-
-
-def dsp_apply_mobility_shifts(raw, shifts):
-    """raw: (n,4). shifts: length-4 sequence of per-channel scan shifts."""
-    out = raw.copy()
-    for ch in range(4):
-        s = int(shifts[ch])
-        if s != 0:
-            out[:, ch] = dsp_shift_channel(out[:, ch], s)
-    return out
-
-
-# --- Baseline ---
-def dsp_airpls_baseline(y, lam, itermax=15):
-    """Adaptive iteratively reweighted penalized least squares (Zhang et al.
-    2010). Like ALS but weights are re-derived every iteration from how far
-    points fall below the current baseline estimate, so it tracks drifting
-    baselines with a single parameter."""
-    n = len(y)
-    y = y.astype(np.float64)
-    w = np.ones(n)
-    e = np.ones(n)
-    D2 = sparse_diags([e, -2 * e, e], [0, 1, 2], shape=(n - 2, n))
-    A0 = D2.T @ D2
-    z = y.copy()
-    total = np.abs(y).sum() or 1.0
-    for it in range(1, itermax + 1):
-        W = sparse_diags(w, 0)
-        z = spsolve(W + lam * A0, w * y)
-        d = y - z
-        neg = d[d < 0]
-        dssn = np.abs(neg.sum())
-        if dssn < 0.001 * total or len(neg) == 0:
-            break
-        w[d >= 0] = 0
-        w[d < 0] = np.exp(it * np.abs(neg) / dssn)
-        w[0] = np.exp(it * np.abs(neg).max() / dssn)
-        w[-1] = w[0]
-    return z
-
-
-def dsp_snip_baseline(y, iterations):
-    """SNIP (Statistics-sensitive Non-linear Iterative Peak-clipping).
-    Works on an LLS-transformed copy (compresses peak heights so tall peaks
-    don't dominate clipping), iteratively clips each point down to the
-    average of its two neighbors at growing distance."""
-    y = np.clip(np.asarray(y, dtype=np.float64), 0, None)
-    v = np.log(np.log(np.sqrt(y + 1) + 1) + 1)
-    iterations = max(1, min(int(iterations), len(v) // 2 - 1))
-    for p in range(1, iterations + 1):
-        left = dsp_shift_channel(v, p)
-        right = dsp_shift_channel(v, -p)
-        v = np.minimum(v, 0.5 * (left + right))
-    baseline = (np.exp(np.exp(v) - 1) - 1) ** 2 - 1
-    return np.clip(baseline, 0, None)
-
-
-def dsp_rubberband_baseline(y, smooth_win=1):
-    """Rubberband (convex hull) baseline.  Computes the lower convex hull
-    of the inverted signal and linearly interpolates between hull vertices
-    to form a baseline floor.  smooth_win (>1) pre-smooths the signal via
-    a moving average before hull construction to suppress noise that would
-    otherwise create spurious hull vertices."""
-    from scipy.spatial import ConvexHull
-    from scipy.ndimage import uniform_filter1d
-    n = len(y)
-    s = min(int(smooth_win), n) if smooth_win > 1 else 1
-    if s > 1:
-        y = uniform_filter1d(y, size=s, mode='nearest')
-    else:
-        y = np.asarray(y, dtype=np.float64)
-    x = np.arange(n, dtype=np.float64)
-    points = np.column_stack([x, -y])
-    hull = ConvexHull(points)
-    hull_pts = points[hull.vertices]
-    hull_pts = hull_pts[np.argsort(hull_pts[:, 0])]
-    baseline = np.interp(x, hull_pts[:, 0], hull_pts[:, 1])
-    return -baseline
-
-
-def dsp_asylS_baseline(y, lam, p=0.01, niter=10):
-    """Asymmetric Least Squares baseline (Eilers 2001).  Same penalty as ALS
-    but uses a constant asymmetry parameter p instead of iterating weights."""
-    n = len(y)
-    y = y.astype(np.float64)
-    e = np.ones(n)
-    D2 = sparse_diags([e, -2 * e, e], [0, 1, 2], shape=(n - 2, n))
-    A = lam * (D2.T @ D2)
-    w = np.ones(n)
-    for _ in range(niter):
-        W = sparse_diags(w, 0)
-        z = spsolve(W + A, w * y)
-        w = p * (y > z) + (1 - p) * (y < z)
-    return z
-
-
-def dsp_arpls_baseline(y, lam=1e5, max_iter=100, tol=1e-5):
-    """Adaptive iteratively reweighted PLS baseline (Oller-More et al.
-    2006).  Uses a smooth weight function based on the std of positive
-    residuals, giving robust automatic weight updates without the manual p
-    parameter of ALS."""
-    n = len(y)
-    y = y.astype(np.float64)
-    e = np.ones(n)
-    D2 = sparse_diags([e, -2 * e, e], [0, 1, 2], shape=(n - 2, n))
-    A = D2.T @ D2
-    w = np.ones(n)
-    for _ in range(max_iter):
-        W = sparse_diags(w, 0)
-        z = spsolve(W + lam * A, w * y)
-        d = y - z
-        neg = d[d < 0]
-        dssn = np.abs(neg.sum())
-        if dssn < 1e-8 or len(neg) == 0:
-            break
-        sigma = np.std(neg)
-        if sigma < 1e-8:
-            break
-        w_new = 1.0 / (1 + np.exp(2 * (d - dssn) / sigma))
-        if np.linalg.norm(w_new - w) / (np.linalg.norm(w) + 1e-10) < tol:
-            w = w_new
-            break
-        w = w_new
-    return z
-
-
-def dsp_compute_baseline(raw, method, window, window2=None):
-    """raw: (n,4). window2 is the method-specific secondary parameter shown
-    by the 'Secondary:' slider (BASELINE_PARAM_CONFIG), or None for methods
-    that don't use one:
-      ALS / AsyLS  -> window2 is 'Asymmetry x100' (1-100); p = window2/100
-      airPLS/arPLS -> window2 is 'Max iters' directly
-    Returns baseline (n,4) array."""
-    n = len(raw)
-    bl = np.zeros_like(raw)
-    bw = window
-    if method == 'None':
-        return bl
-    if method == 'Rolling Minimum':
-        for ch in range(4):
-            bl[:, ch] = minimum_filter1d(raw[:, ch], size=int(bw), mode='reflect')
-    elif method == 'Rolling Median':
-        for ch in range(4):
-            bl[:, ch] = median_filter(raw[:, ch], size=int(bw), mode='reflect')
-    elif method == 'ALS':
-        lam = bw
-        p = (window2 / 100.0) if window2 is not None else 0.005
-        e = np.ones(n)
-        D2 = sparse_diags([e, -2 * e, e], [0, 1, 2], shape=(n - 2, n))
-        A = lam * D2.T @ D2
-        for ch in range(4):
-            y = raw[:, ch].astype(np.float64)
-            w = np.ones(n)
-            z = y
-            for _ in range(10):
-                W = sparse_diags(w, 0)
-                z = spsolve(W + A, w * y)
-                w = p * (y > z) + (1 - p) * (y <= z)
-            bl[:, ch] = z
-    elif method == 'airPLS':
-        itermax = int(window2) if window2 is not None else 15
-        for ch in range(4):
-            bl[:, ch] = dsp_airpls_baseline(raw[:, ch], bw, itermax=itermax)
-    elif method == 'SNIP':
-        for ch in range(4):
-            bl[:, ch] = dsp_snip_baseline(raw[:, ch], bw)
-    elif method == 'Morphological (Top-hat)':
-        size = max(3, int(bw))
-        for ch in range(4):
-            bl[:, ch] = grey_opening(raw[:, ch], size=size)
-    elif method == 'Polynomial Detrend':
-        order = max(1, min(int(bw), n - 1))
-        x_idx = np.arange(n, dtype=np.float64)
-        for ch in range(4):
-            coeffs = np.polyfit(x_idx, raw[:, ch], order)
-            bl[:, ch] = np.polyval(coeffs, x_idx)
-    elif method == 'Rubberband':
-        for ch in range(4):
-            bl[:, ch] = dsp_rubberband_baseline(raw[:, ch], smooth_win=max(1, int(bw)))
-    elif method == 'AsyLS':
-        lam = bw
-        p = (window2 / 100.0) if window2 is not None else 0.01
-        for ch in range(4):
-            bl[:, ch] = dsp_asylS_baseline(raw[:, ch], lam, p=p, niter=10)
-    elif method == 'arPLS':
-        max_iter = int(window2) if window2 is not None else 100
-        for ch in range(4):
-            bl[:, ch] = dsp_arpls_baseline(raw[:, ch], lam=bw, max_iter=max_iter)
-    elif method == 'Flat Offset (200-1200)':
-        # Per-channel flat offset subtraction: take the mean of each channel
-        # over the scan region before the sample signal starts (default
-        # 200-1200), subtract that constant from every scan, and floor the
-        # result at 0 (the caller clips raw-bl at 0, so negatives become 0).
-        start = max(0, int(bw))
-        end = min(n, int(window2) if window2 is not None else start + 1000)
-        if end <= start:
-            end = start + 1000
-        region = raw[max(0, start):min(n, end)]
-        for ch in range(4):
-            ch_region = region[:, ch]
-            if len(ch_region) > 0:
-                bl[:, ch] = float(np.median(ch_region))
-    elif method == 'Noise Offset (pre-1500)':
-        # 2-stage-baseline stage 1: measure the electronic/dye-blob noise floor
-        # in the runs BEFORE the first real peaks (fixed scans 0-1499, the flat
-        # lead-in) and subtract that per-channel constant. The matrix
-        # separation then sees a trace already free of the common-mode offset
-        # (which otherwise bleeds negative artifacts into adjacent channels),
-        # and the chosen 2nd-stage method (e.g. AsyLS) cleans remaining drift.
-        # The ``window``/``window2`` knobs are NOT used here - they stay free
-        # for the 2nd-stage method.
-        end = min(n, 1500)
-        if end <= 1:
-            end = n
-        region = raw[:end]
-        for ch in range(4):
-            ch_region = region[:, ch]
-            if len(ch_region) > 0:
-                bl[:, ch] = float(np.median(ch_region))
-    else:
-        raise ValueError(f'Unknown baseline method: {method}')
-    return bl
-
-
-# --- Smoothing ---
-def dsp_wavelet_denoise(y, pywt, level, threshold_scale=1.0, wavelet='db4'):
-    y = np.asarray(y, dtype=np.float64)
-    n = len(y)
-    max_level = pywt.dwt_max_level(n, pywt.Wavelet(wavelet).dec_len)
-    level = min(level, max_level) if max_level > 0 else 0
-    if level < 1:
-        return y.copy()
-    coeffs = pywt.wavedec(y, wavelet, level=level)
-    detail1 = coeffs[-1]
-    sigma = np.median(np.abs(detail1)) / 0.6745 if len(detail1) else 0.0
-    uthresh = sigma * np.sqrt(2 * np.log(max(n, 2))) * threshold_scale
-    new_coeffs = [coeffs[0]] + [pywt.threshold(c, uthresh, mode='soft')
-                                for c in coeffs[1:]]
-    denoised = pywt.waverec(new_coeffs, wavelet)
-    return denoised[:n]
-
-
-def dsp_fft_lowpass(y, cutoff_period, taper_frac=0.1):
-    """Zero (with a cosine taper, to avoid ringing) all FFT bins whose
-    period is shorter than ``cutoff_period`` scans, then inverse-transform.
-
-    Unlike Butterworth/savgol, this directly nulls periodic noise
-    (electrical pickup, pump/stepper ripple, CCD readout striping) at a
-    specific frequency while keeping gain=1 below the cutoff, so sharp
-    electrophoretic peaks at the bases aren't rounded off."""
-    y = np.asarray(y, dtype=np.float64)
-    n = len(y)
-    spec = np.fft.rfft(y)
-    freqs = np.fft.rfftfreq(n, d=1.0)
-    cutoff_freq = 1.0 / max(cutoff_period, 2.0)
-    taper_width = max(cutoff_freq * taper_frac, 1e-6)
-    gain = np.ones_like(freqs)
-    hi = cutoff_freq + taper_width
-    lo = cutoff_freq - taper_width
-    ramp = (freqs > lo) & (freqs < hi)
-    gain[freqs >= hi] = 0.0
-    if np.any(ramp):
-        gain[ramp] = 0.5 * (1 + np.cos(np.pi * (freqs[ramp] - lo) / (hi - lo)))
-    filtered = np.fft.irfft(spec * gain, n=n)
-    return filtered
-
-
-def dsp_dominant_periodicities(y, top_n=5):
-    """Return the top_n strongest non-DC frequency components as
-    (period_in_scans, relative_power) tuples, sorted by power descending.
-    Use this to spot periodic noise sources before choosing a smoothing
-    method or an FFT-lowpass cutoff."""
-    y = np.asarray(y, dtype=np.float64)
-    n = len(y)
-    y = y - y.mean()
-    spec = np.fft.rfft(y)
-    freqs = np.fft.rfftfreq(n, d=1.0)
-    power = np.abs(spec) ** 2
-    power[0] = 0.0  # drop DC
-    order = np.argsort(power)[::-1][:top_n]
-    out = []
-    for idx in order:
-        f = freqs[idx]
-        period = (1.0 / f) if f > 0 else np.inf
-        out.append((float(period), float(power[idx])))
-    return out
-
-
-def dsp_smooth_signal(corr, method, window, order):
-    """corr: (n,4) baseline-subtracted signal.
-    window/order: the two tunable params for ``method`` (see SMOOTH_PARAM_CONFIG)."""
-    sm = corr.copy()
-    sw, so = window, order
-    if method == 'Savitzky-Golay':
-        if sw > so + 1 and sw % 2 == 1:
-            for ch in range(4):
-                sm[:, ch] = savgol_filter(sm[:, ch], sw, so)
-    elif method == 'Gaussian':
-        for ch in range(4):
-            sm[:, ch] = gaussian_filter1d(sm[:, ch], sigma=so, truncate=sw / so / 2)
-    elif method == 'Moving Avg':
-        if sw >= 3:
-            kernel = np.ones(sw) / sw
-            for ch in range(4):
-                sm[:, ch] = np.convolve(sm[:, ch], kernel, mode='same')
-    elif method == 'Median':
-        sw2 = max(3, sw if sw % 2 == 1 else sw + 1)
-        for ch in range(4):
-            sm[:, ch] = median_filter(sm[:, ch], size=sw2, mode='reflect')
-    elif method == 'Whittaker':
-        lam = sw
-        n = len(sm)
-        e = np.ones(n)
-        D2 = sparse_diags([e, -2 * e, e], [0, 1, 2], shape=(n - 2, n))
-        A = sparse_diags(np.ones(n), 0) + lam * D2.T @ D2
-        for ch in range(4):
-            sm[:, ch] = spsolve(A.tocsr(), sm[:, ch])
-    elif method == 'Butterworth':
-        from scipy.signal import butter, filtfilt
-        order_ = max(1, min(so, 10))
-        wn = float(np.clip(2.0 / max(sw, 2), 1e-4, 0.99))
-        b, a = butter(order_, wn, btype='low')
-        padlen = 3 * (max(len(a), len(b)) - 1)
-        if len(sm) > padlen:
-            for ch in range(4):
-                sm[:, ch] = filtfilt(b, a, sm[:, ch])
-    elif method == 'Wavelet':
-        try:
-            import pywt
-        except ImportError:
-            pass
-        else:
-            level = max(1, min(sw, 8))
-            thresh_scale = max(so, 1) / 100.0
-            for ch in range(4):
-                sm[:, ch] = dsp_wavelet_denoise(sm[:, ch], pywt, level, thresh_scale)
-    elif method == 'LOWESS':
-        try:
-            from statsmodels.nonparametric.smoothers_lowess import lowess as sm_lowess
-        except ImportError:
-            pass
-        else:
-            frac = float(np.clip(sw / 1000.0, 0.001, 0.5))
-            iters = max(0, min(so, 5))
-            x_idx = np.arange(len(sm), dtype=np.float64)
-            delta = 0.01 * (x_idx[-1] - x_idx[0]) if len(x_idx) > 1 else 0.0
-            for ch in range(4):
-                sm[:, ch] = sm_lowess(sm[:, ch], x_idx, frac=frac, it=iters,
-                                      delta=delta, return_sorted=False)
-    elif method == 'FFT Lowpass':
-        taper_frac = so / 100.0  # "Taper %" slider, 0-50
-        for ch in range(4):
-            sm[:, ch] = dsp_fft_lowpass(sm[:, ch], sw, taper_frac=max(taper_frac, 0.01))
-    else:
-        raise ValueError(f'Unknown smoothing method: {method}')
-    return sm
-
-
-def dsp_separate_channels(sm, bl, matrix):
-    """Spectral (dye-bleed) separation via matrix inversion."""
-    try:
-        inv = np.linalg.inv(matrix)
-    except np.linalg.LinAlgError:
-        inv = np.linalg.pinv(matrix)
-    bm = np.median(bl, axis=0)
-    # With baseline method 'None' the baseline is all zeros, so the per-
-    # channel dye-gain normalization has nothing to divide by - fall back to
-    # no gain compensation (factor 1) instead of amplifying to ~1e10.
-    bm[bm <= 1e-9] = 1.0
-    gn = sm / (bm[np.newaxis, :] + 1e-10)
-    separated = gn @ inv.T
-    return np.clip(separated, 0, None)
-
-
-def dsp_full_pipeline(raw, mobility_shifts, baseline_method, baseline_window,
-                      smooth_method, smooth_window, smooth_order, matrix,
-                      baseline_window2=None, matrix_apply_point='smoothed'):
-    """Full processing pipeline. Returns (raw, bl, corr, sm, separated, mix).
-
-    ``matrix_apply_point`` picks which stage the crosstalk (dye-bleed)
-    separation matrix is applied to (development knob):
-      'none'       - no separation at all; ``separated`` is just the
-                     corrected + smoothed signal (the raw 4 channels pass
-                     straight through to peak calling)
-      'offset'     - two-stage baseline: subtract the pre-peak noise floor
-                     (Noise Offset baseline, i.e. per-channel median of the
-                     lead-in scans), THEN separate the offset-corrected trace,
-                     THEN run the chosen baseline method on the separated
-                     signal before smoothing. This is your "measure noise
-                     before 1500, subtract, matrix-correct, then AsyLS" order.
-      'raw'        - separate the raw data, then baseline-correct the
-                     separated signal, then smooth it
-      'corrected'  - separate the baseline-corrected signal, then smooth the
-                     separated signal
-      'smoothed'   - separate the baseline-corrected + smoothed signal
-                     (default; matches the classic Sanger pipeline order)
-    In every mode the returned ``separated`` is the trace that gets mobility-
-    shifted and basecalled, so changing the smoothing always affects it.
-    Mobility shifts are never applied inside the pipeline (callers shift the
-    separated trace only just before peak detection).
-    """
-    raw = raw.copy()
-    if matrix_apply_point == 'offset':
-        # stage 1: noise floor only (the 'Noise Offset (pre-1500)' method)
-        off = dsp_compute_baseline(raw, 'Noise Offset (pre-1500)',
-                                   baseline_window, baseline_window2)
-        off_corr = np.clip(raw - off, 0, None)
-        sep_raw = dsp_separate_channels(off_corr, off, matrix)
-        # stage 2: chosen baseline (e.g. AsyLS) on the separated signal
-        sep_bl = dsp_compute_baseline(sep_raw, baseline_method, baseline_window,
-                                      baseline_window2)
-        sep_corr = np.clip(sep_raw - sep_bl, 0, None)
-        separated = dsp_smooth_signal(sep_corr, smooth_method, smooth_window,
-                                      smooth_order)
-        return raw, off, off_corr, sep_corr, separated, matrix
-    bl = dsp_compute_baseline(raw, baseline_method, baseline_window, baseline_window2)
-    corr = np.clip(raw - bl, 0, None)
-    sm = dsp_smooth_signal(corr, smooth_method, smooth_window, smooth_order)
-    if matrix_apply_point == 'raw':
-        sep_raw = dsp_separate_channels(raw, bl, matrix)
-        sep_bl = dsp_compute_baseline(sep_raw, baseline_method, baseline_window,
-                                      baseline_window2)
-        sep_corr = np.clip(sep_raw - sep_bl, 0, None)
-        separated = dsp_smooth_signal(sep_corr, smooth_method, smooth_window,
-                                      smooth_order)
-    elif matrix_apply_point == 'corrected':
-        sep_corr = dsp_separate_channels(corr, bl, matrix)
-        separated = dsp_smooth_signal(sep_corr, smooth_method, smooth_window,
-                                      smooth_order)
-    elif matrix_apply_point == 'none':
-        separated = sm.copy()
-    elif matrix_apply_point == 'shifted':
-        # Experimental: apply the crosstalk matrix AFTER per-channel mobility
-        # correction instead of before. Each smoothed channel is shifted by its
-        # lag and the four shifted channels are then separated. This is the
-        # inverse of the classic order (separate, then shift each separated
-        # channel) and is exposed via the 'on Shifted' matrix tick box so the
-        # user can A-B it. When this stage is active the shift is baked into
-        # ``separated`` and the GUI passes zero shifts downstream (see
-        # _effective_shifts) so it is not applied twice.
-        shifted = np.empty_like(sm)
-        for ch in range(4):
-            shifted[:, ch] = dsp_shift_channel(sm[:, ch], int(mobility_shifts[ch]))
-        separated = dsp_separate_channels(shifted, bl, matrix)
-    else:
-        separated = dsp_separate_channels(sm, bl, matrix)
-    return raw, bl, corr, sm, separated, matrix
-
-
-# ---------------------------------------------------------------------------
-# peak_calling: Independent peak detection + mobility estimation (inlined)
-# ---------------------------------------------------------------------------
-def pc_normalize_peaks(separated, mode='total_signal', window=800):
-    """Normalize the 4-channel separated trace so peak heights are
-    comparable across channels and across the run.
-
-    mode:
-      'channel_max'  - divide each channel by its own global max.
-      'total_signal' - divide each scan by the sum across all 4 channels
-                       at that scan. Removes overall intensity drift while
-                       preserving the relative dye ratio at each scan.
-      'rolling_local' - divide by a rolling max so normalization tracks
-                        the slow loss of signal amplitude late in a long run.
-    """
-    x = np.clip(np.asarray(separated, dtype=np.float64), 0, None)
-    if mode == 'channel_max':
-        cmax = x.max(axis=0)
-        cmax[cmax == 0] = 1.0
-        return x / cmax[np.newaxis, :]
-    elif mode == 'total_signal':
-        total = x.sum(axis=1)
-        scale = np.median(total[total > 0]) if np.any(total > 0) else 1.0
-        total_safe = np.where(total > 0, total, scale)
-        return x / total_safe[:, np.newaxis] * scale
-    elif mode == 'rolling_local':
-        total = x.sum(axis=1)
-        local_max = maximum_filter1d(total, size=max(int(window), 3), mode='nearest')
-        local_max = np.clip(local_max, np.percentile(total, 50) * 0.05 + 1e-9, None)
-        target = np.median(local_max)
-        return x / local_max[:, np.newaxis] * target
-    else:
-        raise ValueError(f'Unknown normalization mode: {mode}')
-
-
-def pc_normalize_display(separated, window=800, region=None):
-    """Per-channel rolling-local normalization for display.
-
-    Dividing by each channel's own global max (a single scalar) makes all
-    peaks sit in 0-1 at the start of the run but they shrink to ~0.3-0.5
-    by the end, because MegaBACE/CE signal amplitude decays continuously
-    with scan number. ESD instead reports peaks that are ~uniform 0-1 for
-    the entire basecalled region. To match that, divide each channel by a
-    rolling local max (window ~= norm window): every peak is then pulled
-    up to ~1 regardless of where in the run it sits, so the later (weaker)
-    peaks are visible at the same height as the early ones.
-
-    When ``region`` is given, the rolling-max denominator is floored by
-    the channel's leading-baseline noise level (just before ``region[0]``).
-    Without this, flat baseline noise would be normalized to ~1.0 - the
-    same scale as real peaks - and show up as a forest of false peaks in
-    the lead-in. With the floor, baseline ripple is suppressed well below
-    1 while genuine peaks (whose rolling max dwarfs the floor) stay ~1."""
-    x = np.clip(np.asarray(separated, dtype=np.float64), 0, None)
-    out = np.empty_like(x)
-    for ch in range(4):
-        ch_sig = x[:, ch]
-        local_max = maximum_filter1d(
-            ch_sig, size=max(int(window), 3), mode='nearest')
-        floor = np.percentile(ch_sig, 50) * 0.05 + 1e-9
-        if region is not None:
-            r0 = max(0, int(region[0]))
-            lead = ch_sig[max(0, r0 - 200):r0]
-            if len(lead) > 0:
-                lead_floor = float(np.percentile(lead, 90))
-            else:
-                lead_floor = floor
-            # 2.5x the baseline ripple upper bound so noise stays <~0.4,
-            # but never exceed the real peak scale (1/3 of the signal max).
-            signal_max = float(ch_sig[r0:int(region[1])].max()) if int(region[1]) > r0 else float(ch_sig.max())
-            floor = max(floor, min(2.5 * lead_floor, signal_max / 3.0 + 1e-9))
-        denom = np.maximum(local_max, floor)
-        out[:, ch] = ch_sig / denom
-    # Re-scale so the bulk of the peaks sit around ~1 like ESD.
-    scale = np.percentile(out, 99.5, axis=0)
-    scale[scale <= 0] = 1.0
-    return out / scale[np.newaxis, :]
-
-
-def pc_detect_peaks_4ch(separated, min_distance=6, prominence_frac=0.02, width=None):
-    """Run find_peaks independently on each of the 4 (normalized)
-    separated channels, then merge into one ordered list of
-    (position, channel, height) picking the tallest candidate within
-    ``min_distance`` scans whenever two channels both claim a peak there."""
-    x = np.clip(np.asarray(separated, dtype=np.float64), 0, None)
-    candidates = []
-    for ch in range(4):
-        scale = np.percentile(x[:, ch], 99.5)
-        if scale <= 0:
-            continue
-        prom = max(scale * prominence_frac, 1e-9)
-        kwargs = dict(distance=max(1.0, float(min_distance)), prominence=prom)
-        if width is not None:
-            kwargs['width'] = width
-        peaks, _ = find_peaks(x[:, ch], **kwargs)
-        for p in peaks:
-            candidates.append((int(p), ch, float(x[p, ch])))
-    candidates.sort(key=lambda c: c[0])
-
-    merged = []
-    i = 0
-    while i < len(candidates):
-        j = i
-        cluster = [candidates[i]]
-        while j + 1 < len(candidates) and \
-              candidates[j + 1][0] - cluster[-1][0] <= min_distance:
-            j += 1
-            cluster.append(candidates[j])
-        best = max(cluster, key=lambda c: c[2])
-        merged.append(best)
-        i = j + 1
-    return merged
-
-
-def pc_call_bases(separated, min_distance=6, prominence_frac=0.02,
-                  normalize_mode='total_signal'):
-    """End-to-end independent basecall: normalize -> detect peaks per
-    channel -> merge -> assign letters. Returns (positions, sequence, heights)."""
-    norm = pc_normalize_peaks(separated, mode=normalize_mode)
-    merged = pc_detect_peaks_4ch(norm, min_distance=min_distance,
-                                 prominence_frac=prominence_frac)
-    positions = np.array([m[0] for m in merged], dtype=np.int64)
-    sequence = ''.join(BASE_LETTERS[m[1]] for m in merged)
-    heights = np.array([m[2] for m in merged], dtype=np.float64)
-    return positions, sequence, heights
-
-
-def pc_signal_onset(separated, onset_frac=0.05, smooth=40, rise_sigma=4.0,
-                    lead_frac=0.05, rise_window=None):
-    """Find the scan index where the sample DNA signal first starts to
-    *rise* above the instrument baseline, rather than where it merely
-    crosses a fixed threshold.
-
-    CE reads begin with a long flat baseline (electrokinetic injection +
-    buffer drift) before the first dye-labeled fragment arrives; naive peak
-    detection happily calls spurious ambiguous bases in that flat region
-    because rolling-local normalization amplifies the noise there.  A
-    fixed amplitude threshold is fragile: a run with unusually low noise
-    crosses it during a gentle pre-peak slope too early, while a run with
-    weak early signal but a high later max crosses it only after the first
-    real peaks are long gone.
-
-    Instead we look at the RATE of increase of the smoothed summed
-    intensity: the baseline is flat (rise ~ noise), the sample is where the
-    rise clearly exceeds the noise of the leading baseline.  We return the
-    first scan where intensity rises by ``rise_sigma`` noise-sigmas over a
-    window of ``rise_window`` scans while also sitting above the leading
-    baseline floor.
-
-    Returns 0 if the trace is empty/constant (caller should then keep all
-    peaks)."""
-    x = np.clip(np.asarray(separated, dtype=np.float64), 0, None)
-    tot = x.sum(axis=1)
-    n = len(tot)
-    if n == 0 or tot.max() <= 0:
-        return 0
-    smooth = max(1, int(smooth))
-    if n >= smooth:
-        tot = np.convolve(tot, np.ones(smooth) / smooth, mode='same')
-    W = int(rise_window) if rise_window else max(10, n // 200)
-    W = max(2, min(W, n - 1))
-    lead_n = max(int(n * max(float(lead_frac), 0.01)), 1)
-    lead = tot[:lead_n]
-    floor = float(np.median(lead))
-    mad = float(np.median(np.abs(lead - floor)))
-    spread = max(float(lead.std()), 1.5 * mad, 1e-9)
-    rise = tot[W:] - tot[:-W]
-    # noise of the rise in the flat leading region
-    rise_lead = rise[:max(1, lead_n - W)]
-    rise_noise = max(float(rise_lead.std()) if len(rise_lead) > 1 else 0.0, 1e-9)
-    rise_thresh = float(rise_sigma) * rise_noise
-    above_floor = tot >= floor + float(rise_sigma) * spread
-    candidates = np.where((rise > rise_thresh) & above_floor[W:])[0]
-    if len(candidates) == 0:
-        # fall back to the amplitude test rather than returning 0
-        idx = np.where(tot >= max(floor + rise_thresh,
-                                  tot.max() * max(float(onset_frac), 1e-6)))[0]
-        if len(idx) == 0:
-            return 0
-        return max(0, int(idx[0]) - smooth // 2)
-    # Skip short (<=2 scan) isolated bumps: the real ramp produces a
-    # sustained run of candidates. Find the first run of >= 3 consecutive.
-    c = candidates[0]
-    i = 0
-    while i < len(candidates):
-        j = i
-        while j + 1 < len(candidates) and candidates[j + 1] == candidates[j] + 1:
-            j += 1
-        if j - i + 1 >= 3:
-            c = candidates[i]
-            break
-        i = j + 1
-    onset = W + int(c) + smooth // 4
-    # step back a few scans so we don't clip the first genuine peak apex
-    return max(0, int(onset) - W // 2)
-
-
-def pc_signal_region(separated, onset_frac=0.05, tail_frac=0.10,
-                     smooth=40, tail_margin=10):
-    """Detect the callable signal window [start, stop) of a CE run.
-
-    Returns the scan range that actually contains DNA signal: ``start``
-    from the same rise-based onset test used by the basecaller
-    (``pc_signal_onset``) and ``stop`` as the last scan where the smoothed
-    total intensity still exceeds a small fraction of the in-region max.
-    Everything before ``start`` is flat instrument baseline; everything at
-    or after ``stop`` is the decaying tail / final buffer. Running the
-    normalization and basecalling *math* only inside this window keeps
-    baseline noise from being amplified into false peaks and keeps the
-    display honest. A small ``tail_margin`` is appended so the last real
-    peaks are not clipped.
-
-    Returns (start, stop) ints. Falls back to (0, n) when the trace is
-    empty or constant."""
-    x = np.clip(np.asarray(separated, dtype=np.float64), 0, None)
-    n = len(x)
-    if n == 0:
-        return 0, n
-    tot = x.sum(axis=1)
-    if tot.max() <= 0:
-        return 0, n
-    start = int(pc_signal_onset(separated, onset_frac=onset_frac, smooth=smooth))
-    start = max(0, min(start, n - 1))
-    sig = tot[start:]
-    peak = float(sig.max())
-    if peak <= 0:
-        return start, min(n, start + 1)
-    thr = peak * max(float(tail_frac), 0.0)
-    idx = np.where(sig > thr)[0]
-    if len(idx) == 0:
-        return start, min(n, start + 1)
-    stop = start + int(idx[-1]) + 1
-    stop = min(n, stop + int(tail_margin))
-    return start, stop
-
-
-def pc_call_bases_with_shifts(separated, shifts, min_distance=6,
-                              prominence_frac=0.02, tolerance=4,
-                              normalize=True, norm_window=800,
-                              min_signal_frac=0.25, onset_frac=0.05,
-                              signal_onset_smooth=40, min_height_ratio=2.0,
-                              region=None):
-    """Detect peaks on per-channel-shifted separated traces and merge with
-    IUPAC ambiguity codes.
-
-    Unlike ``pc_call_bases``, this applies per-channel mobility shifts
-    *after* baseline/smoothing/matrix, then runs ``find_peaks`` independently
-    on each shifted channel. Peaks from different channels within
-    ``tolerance`` scans of each other are at the same base position and
-    combined using IUPAC single-letter codes (e.g. A+C -> M, A+G+T -> D).
-
-    If ``normalize`` is True, each channel is divided by a rolling local
-    maximum (window = ``norm_window`` scans) to compensate for the signal
-    decay inherent in Sanger sequencing by CE — shorter fragments produce
-    stronger signals, so later (longer) peaks are systematically weaker.
-    Per-channel rolling normalization makes late peaks detectable at the
-    same relative threshold as early ones.
-
-    ``min_signal_frac`` sets the minimum fraction of the tallest peak's
-    signal required for a channel to contribute to an ambiguous base call.
-    For example, with min_signal_frac=0.25, a minor bump at 15% of the
-    dominant peak's height is rejected — only genuinely overlapping signals
-    (each >25% of the max) are combined into IUPAC codes. This prevents
-    noise/artifact peaks under a large peak from being mis-called as
-    ambiguous bases (e.g. falsely calling W instead of just A).
-
-    Returns (positions, sequence, base_groups, intensities) where:
-      positions  — scan index of each called position (midpoint of merged peaks)
-      sequence   — IUPAC-coded base string
-      base_groups — list of sets of base letters at each position
-      intensities — dict {base_letter: height} at each position
-
-    ``region``=(start, stop) restricts peak calling to that scan window:
-    only peaks with start <= pos < stop are kept. When given it overrides
-    the ``onset_frac`` onset cut, so the basecalling math runs only inside
-    the callable signal region (see pc_signal_region).
-    """
-    from scipy.signal import find_peaks as _fp
-
-    n = len(separated)
-    shifted_all = [dsp_shift_channel(separated[:, ch], int(shifts[ch]))
-                   for ch in range(4)]
-
-    # Per-channel absolute height floor derived from the leading baseline
-    # noise.  Rolling-local normalization makes flat-baseline noise sit at
-    # ~1.0 (the same scale as real peaks), so peaks slammed together by
-    # noise in a run with a bumpy baseline can still pass prominence.  Each
-    # called peak must therefore rise at min_height_ratio x above its own
-    # channel's leading-baseline noise level, which cleanly separates
-    # genuine fragments from baseline ripple regardless of normalization.
-    # The 90th percentile (rather than the median) captures the noise-ripple
-    # upper bound so bumpy-baseline runs are rejected without throwing away
-    # weak-but-real peaks from low-signal runs.
-    lead_n = max(int(n * 0.05), 1)
-    ch_floor = [float(np.percentile(np.clip(shifted_all[ch][:lead_n], 0, None), 90))
-                for ch in range(4)]
-
-    channels = []
-    for ch in range(4):
-        shifted = shifted_all[ch]
-        if normalize:
-            rolled = maximum_filter1d(np.clip(shifted, 0, None),
-                                      size=max(3, int(norm_window)),
-                                      mode='nearest')
-            rolled = np.where(rolled > 0, rolled, 1.0)
-            norm_ch = shifted / rolled
-        else:
-            norm_ch = shifted / (shifted.max() + 1e-12) if shifted.max() > 0 else shifted
-        # Prominence threshold must be in norm_ch's own units (~0-1 after
-        # either normalization branch above), not the raw signal's units -
-        # using the raw scale here made the threshold roughly 100-300x too
-        # large for the normalized signal, silently rejecting real peaks.
-        scale = np.percentile(np.clip(norm_ch, 0, None), 99.5)
-        prom = max(scale * prominence_frac, 1e-9) if scale > 0 else 1e-9
-        peaks, _ = _fp(norm_ch, distance=max(1, min_distance), prominence=prom)
-        floor_ch = ch_floor[ch] * max(float(min_height_ratio), 0.0)
-        for p in peaks:
-            if shifted[p] >= floor_ch:
-                channels.append((int(p), ch, float(shifted[p])))
-
-    channels.sort(key=lambda c: c[0])
-
-    # Reject spurious peaks called in the flat baseline before the sample
-    # actually reaches the detector window (see pc_signal_onset).  Setting
-    # onset_frac=0 disables the cut entirely.  An explicit region=(start,
-    # stop) overrides the onset cut: basecalling math runs only inside the
-    # callable signal window.
-    start = 0
-    stop = n
-    if region is not None and int(region[1]) > int(region[0]):
-        start = max(0, int(region[0]))
-        stop = min(n, int(region[1]))
-    elif onset_frac and onset_frac > 0:
-        start = pc_signal_onset(separated, onset_frac=onset_frac,
-                                smooth=signal_onset_smooth)
-    channels = [c for c in channels if start <= c[0] < stop]
-
-    positions = []
-    base_groups = []
-    intensities = []
-    i = 0
-    while i < len(channels):
-        j = i
-        cluster = [channels[i]]
-        # Compare each candidate against the cluster's *first* member, not
-        # its last. With per-member chaining (``... - cluster[-1][0]``), a
-        # few tiny noise peaks could bridge two real peaks 8+ scans apart
-        # into one cluster, so the taller of the two swallowed its neighbor
-        # (e.g. a big T peak at 2975 silently eating a genuine A peak at
-        # 2983). Anchoring on the cluster start keeps such peaks separate.
-        cluster_start = channels[i][0]
-        while j + 1 < len(channels) and channels[j + 1][0] - cluster_start <= tolerance:
-            j += 1
-            cluster.append(channels[j])
-        max_signal = max(c[2] for c in cluster)
-        min_signal = max_signal * min_signal_frac
-        valid = [c for c in cluster if c[2] >= min_signal]
-        if len(valid) == 1:
-            bases = frozenset([BASE_LETTERS[valid[0][1]]])
-        else:
-            bases = frozenset(BASE_LETTERS[c[1]] for c in valid)
-        best = max(valid, key=lambda c: c[2])
-        pos = best[0]
-        seq_letter = IUPAC_CODES.get(bases, 'N')
-        intens = {BASE_LETTERS[c]: h for _, c, h in valid}
-        positions.append(pos)
-        base_groups.append(bases)
-        intensities.append(intens)
-        i = j + 1
-
-    positions = np.array(positions, dtype=np.int64)
-    sequence = ''.join(IUPAC_CODES.get(b, 'N') for b in base_groups)
-    return positions, sequence, base_groups, intensities
-
-
-def pc_call_bases_greedy(separated, shifts, window=5, min_frac=0.20,
-                         norm_window=800, region=None):
-    """Greedy maximum-intensity peak caller on the per-channel-normalized
-    combined envelope.
-
-    This is the classic Sanger "greedy" strategy (the same one used by the
-    Biopython/electropherogram-style callers) but applied to the separated
-    (matrix-corrected, mobility-shifted) traces instead of raw channel
-    intensities - that preprocessing is what makes it work. Each channel is
-    divided by its rolling local maximum (``norm_window`` scans) so all four
-    channels sit on the same ~0-1 scale, then the four normalized channels
-    are combined with a pointwise max. The caller repeatedly takes the
-    global maximum of that envelope, calls the dominant channel there, and
-    excises a band of +/- ``window`` scans around it so the next iteration
-    finds the next base. It stops when the highest remaining envelope value
-    drops below ``min_frac`` of the region maximum.
-
-    Picking the strongest peaks first is what makes it robust: noise bumps
-    are never reached (a taller real peak is always excised first) and
-    shoulder artifacts are excised away with their peak. On the M13 plate
-    this replaces the per-channel cluster caller (mean NW identity 88.3% vs
-    81.1%, better on all 96 wells).
-
-    ``region``=(start, stop) restricts calling to that scan window (see
-    pc_signal_region); when None the auto onset cut is used.
-
-    Returns (positions, sequence, base_groups, intensities) where:
-      positions   — scan index of each called position (pick order sorted)
-      sequence    — base letter string (one unambiguous base per position)
-      base_groups — list of frozensets, each holding the single called letter
-      intensities — list of {letter: separated height} dicts
-    """
-    n = len(separated)
-    shifted_all = [dsp_shift_channel(separated[:, ch], int(shifts[ch]))
-                   for ch in range(4)]
-    normed = np.empty_like(separated)
-    for ch in range(4):
-        shifted = shifted_all[ch]
-        rolled = maximum_filter1d(np.clip(shifted, 0, None),
-                                  size=max(3, int(norm_window)), mode='nearest')
-        rolled = np.where(rolled > 0, rolled, 1.0)
-        normed[:, ch] = shifted / rolled
-    comb = normed.max(axis=1)
-    start, stop = 0, n
-    if region is not None and int(region[1]) > int(region[0]):
-        start, stop = max(0, int(region[0])), min(n, int(region[1]))
-    else:
-        start = pc_signal_onset(separated, onset_frac=0.05, smooth=40)
-    if start >= stop:
-        return np.array([], dtype=np.int64), '', [], []
-    threshold = max(float(comb[start:stop].max()) * min_frac, 1e-9)
-    work = comb.copy()
-    work[:start] = -1.0
-    work[stop:] = -1.0
-    picks = []
-    letters = []
-    while True:
-        i = int(np.argmax(work))
-        if work[i] < threshold:
-            break
-        ch = int(np.argmax(normed[i]))
-        letter = CHEM_MAP[ch]
-        picks.append(i)
-        letters.append(letter)
-        lo, hi = max(0, i - int(window)), min(n, i + int(window) + 1)
-        work[lo:hi] = -1.0
-    order = np.argsort(picks)
-    positions = np.array(picks, dtype=np.int64)[order]
-    sequence = ''.join(letters[k] for k in order)
-    base_groups = [frozenset([letters[k]]) for k in order]
-    intensities = [{letters[k]: float(shifted_all[int(np.argmax(normed[picks[k]]))]
-                                        [picks[k]])} for k in order]
-    return positions, sequence, base_groups, intensities
-
-
-def pc_fill_in_combined_peaks(separated, shifts, positions=None,
-                              min_distance=1, prominence_frac=0.02,
-                              norm_window=800, fill_gap=3, fill_margin=0.2,
-                              onset_frac=0.05, signal_onset_smooth=40,
-                              min_height_ratio=2.0, region=None):
-    """Recover bases the per-channel cluster merge silently swallowed.
-
-    pc_call_bases_with_shifts merges every per-channel peak within
-    ``tolerance`` scans of a cluster's start into one call and keeps only
-    the tallest member. Two genuinely adjacent bases (e.g. G~2493 followed
-    by T~2496, just 3 scans apart after mobility correction) therefore end
-    up as a single call, with the weaker base dropped. This is the standard
-    Sanger edge case: adjacent bases on *different* channels can land closer
-    than any per-channel ``min_distance``.
-
-    This function re-runs peak detection on the combined envelope
-    (``max`` over the 4 shifted channels), where the merged-away base is
-    still a clean local maximum, and returns every position that:
-
-      * sits at least ``fill_gap`` scans from every existing call
-        (so it is genuinely a separate base, not a duplicate or the
-        shoulder of a neighbouring peak),
-      * has a dominant channel that clearly beats the runner-up
-        (margin >= ``fill_margin``, i.e. it is a clean call, not a
-        heterozygous/co-eluting position),
-      * rises above its own channel's leading-baseline noise floor
-        (same ``min_height_ratio`` test the main caller uses).
-
-    Returns a sorted list of (scan_position, base_letter) tuples ready to be
-    merged into the per-channel call set. Purely signal-based - no reference
-    used - so the caller stays genuinely independent."""
-    from scipy.signal import find_peaks as _fp
-
-    shifted_all = [dsp_shift_channel(separated[:, ch], int(shifts[ch]))
-                   for ch in range(4)]
-    comb = np.max(np.column_stack(shifted_all), axis=1)
-    n = len(comb)
-    if n == 0:
-        return []
-    rolled = maximum_filter1d(np.clip(comb, 0, None),
-                              size=max(3, int(norm_window)), mode='nearest')
-    rolled = np.where(rolled > 0, rolled, 1.0)
-    norm = comb / rolled
-    scale = np.percentile(np.clip(norm, 0, None), 99.5)
-    prom = max(scale * prominence_frac, 1e-9) if scale > 0 else 1e-9
-    peaks, _ = _fp(norm, distance=max(1.0, float(min_distance)),
-                   prominence=prom)
-
-    lead_n = max(int(n * 0.05), 1)
-    ch_floor = [float(np.percentile(np.clip(shifted_all[ch][:lead_n], 0, None), 90))
-                for ch in range(4)]
-
-    start = 0
-    stop = n
-    if region is not None and int(region[1]) > int(region[0]):
-        start = max(0, int(region[0]))
-        stop = min(n, int(region[1]))
-    elif onset_frac and onset_frac > 0:
-        start = pc_signal_onset(separated, onset_frac=onset_frac,
-                                smooth=signal_onset_smooth)
-
-    existing = set(int(p) for p in (positions or []))
-    fill_gap = max(1, int(fill_gap))
-    fill_margin = float(fill_margin)
-    floor_mult = max(float(min_height_ratio), 0.0)
-    added = []
-    for p in peaks:
-        p = int(p)
-        if p < start or p >= stop:
-            continue
-        vals = np.array([shifted_all[ch][p] for ch in range(4)])
-        top = vals.max()
-        if top <= 0:
-            continue
-        dom_ch = int(np.argmax(vals))
-        if top < ch_floor[dom_ch] * floor_mult:
-            continue
-        second = float(np.partition(vals, -2)[-2])
-        if (top - second) / top < fill_margin:
-            continue
-        if any(abs(p - q) < fill_gap for q in existing):
-            continue
-        added.append((p, BASE_LETTERS[dom_ch]))
-        existing.add(p)
-    return sorted(added, key=lambda t: t[0])
-
-
-# ---------------------------------------------------------------------------
-# LifeTrace-style basecalling (Walther, Bartha & Morris 2001, Genome Res. 11:875)
-#
-# The LifeTrace algorithm was designed *specifically* for MegaBACE capillary
-# sequencers, whose traces show the notorious "accordion effect": peak-to-peak
-# spacing changes abruptly along the run (3-fold in the paper's example, and
-# 8.2 -> 10.3 -> 6.7 scans across A01/Cp312 here).  Phred's approach - predict
-# idealized peak locations from a uniform-spacing assumption and match observed
-# peaks to them - desynchronizes when the spacing jumps, producing insertion/
-# deletion errors.  LifeTrace instead uses only LOCAL structure:
-#
-#   1. Peak-shape factor R[b,loc]: Pearson correlation of each trace with an
-#      ideal Gaussian model peak over a 7-point window.  Peak-like segments
-#      score +1, concavities -1, monotone segments ~0.
-#   2. One combined trace LT(loc) = L^k norm (k=4) over the four channels of
-#      f = T * (R rescaled to [0,1]).  Narrower peaks, less underlying noise.
-#   3. All local maxima of LT are candidate base positions - no global spacing
-#      model, so the accordion effect can't desynchronize the caller.
-#   4. Base assignment: the channel with the largest fractional AREA in a 7-
-#      point window, weighted by R.  If that channel is only the 3rd/4th by
-#      plain area, call N (noise in the dominant dye isn't a real base).
-#   5. Light quality filters: merge duplicate same-base calls, remove calls
-#      whose height is marginal, and re-add bases to broad Gaussian-like peaks.
-#
-# Implemented as pc_lifetrace_transform() + pc_lifetrace_basecall() so each
-# stage can be tuned/A-B'd against pc_call_bases_with_shifts headlessly.
-# ---------------------------------------------------------------------------
-
-def pc_lifetrace_peaks_shape(traces, window=7, sigma=3.5):
-    """Peak-shape factor R[b,loc] per channel, via sliding Pearson correlation
-    with an ideal Gaussian model peak (mp).  Values in [-1, 1]: +1 at a
-    peak-like centre, ~0 on monotone slopes, -1 in concavities."""
-    traces = np.clip(np.asarray(traces, dtype=np.float64), 0, None)
-    n = len(traces)
-    half = max(1, window // 2)
-    i = np.arange(-half, half + 1, dtype=np.float64)
-    mp = np.exp(-i * i / (2.0 * sigma * sigma))
-    mp_c = mp - mp.mean()
-    sd_mp = np.sqrt((mp_c * mp_c).sum()) or 1.0
-    R = np.zeros_like(traces)
-    if n <= half:
-        return R
-    # sliding_window_view needs numpy>=1.20 and produces shape (n-w+1, w)
-    w = 2 * half + 1
-    for b in range(4):
-        t = traces[:, b]
-        view = np.lib.stride_tricks.sliding_window_view(t, w)
-        t_c = view - view.mean(axis=1, keepdims=True)
-        sd_t = np.sqrt((t_c * t_c).sum(axis=1))
-        denom = sd_t * sd_mp
-        r = (t_c @ mp_c) / np.where(denom > 1e-12, denom, 1.0)
-        r[np.abs(denom) <= 1e-12] = 0.0
-        R[half:n - half, b] = r
-    # terminal 'half' trace points have no full window; LifeTrace zeros them
-    return R
-
-
-def pc_lifetrace_transform(separated, window=7, sigma=3.5, k=4.0):
-    """LifeTrace combined peak-likeness trace LT(loc).
-
-    R[b,loc] = peak-shape factor (Pearson corr. with Gaussian model peak).
-    Rescaled to [0,1] (the paper multiplies the trace by r rescaled so peak-
-    like regions keep full weight while flat/monotone regions shrink), then
-    f = T * R.  LT is the L^k norm across channels (k=4: converges toward the
-    max with mild smoothing; the paper's best setting)."""
-    T = np.clip(np.asarray(separated, dtype=np.float64), 0, None)
-    R = pc_lifetrace_peaks_shape(T, window=window, sigma=sigma)
-    R01 = np.clip((R + 1.0) / 2.0, 0.0, 1.0)
-    f = np.clip(T * R01, 0.0, None)
-    return np.power(np.sum(np.power(f, k), axis=1), 1.0 / k)
-
-
-def pc_lifetrace_basecall(separated, shifts, window=7, sigma=3.5, k=4.0,
-                          min_height_ratio=2.0, onset_frac=0.05,
-                          signal_onset_smooth=40, merge_same=3.0,
-                          add_broad_peaks=False, add_broad_max=3,
-                          floor_frac=0.05, peak_dist=2):
-    """LifeTrace-style independent basecall.
-
-    Returns (positions, sequence, base_groups, intensities) - same contract as
-    pc_call_bases_with_shifts so the display / comparison code can run either.
-
-    positions  - scan index of each call (apex of combined LT peak)
-    sequence   - primary bases ('N' where the winning channel is only 3rd/4th
-                 by plain area)
-    base_groups / intensities - single-base groups (no IUPAC merging here; the
-                 S*best scoring is already the paper's max-fractional-area rule)
-    """
-    sep = np.clip(np.asarray(separated, dtype=np.float64), 0, None)
-    shifted = sep.copy()
-    for ch in range(4):
-        s = int(shifts[ch])
-        if s != 0:
-            shifted[:, ch] = dsp_shift_channel(shifted[:, ch], s)
-
-    LT = pc_lifetrace_transform(shifted, window=window, sigma=sigma, k=k)
-    n = len(LT)
-
-    # All local maxima that clear a noise-scaled floor.  LifeTrace locates
-    # peaks from LT alone (no per-channel find_peaks), so the accordion
-    # effect can't break the detection.
-    lt_p99 = float(np.percentile(LT, 99.5))
-    floor = max(lt_p99 * floor_frac, 1e-9)
-    dist = peak_dist if peak_dist and peak_dist > 0 else max(2, int(window * 0.5))
-    peaks, _ = find_peaks(LT, distance=dist, height=floor)
-    peaks = np.asarray(peaks, dtype=np.int64)
-
-    # Onset cut (reuse the existing rise-detector so pre-sample noise is
-    # excluded the same way as pc_call_bases_with_shifts).
-    start = 0
-    if onset_frac and onset_frac > 0:
-        start = pc_signal_onset(separated, onset_frac=onset_frac,
-                                smooth=signal_onset_smooth)
-
-    # Leading-baseline noise floor per channel (absolute-units gate, so a
-    # near-zero channel can't win by fractional-area technicality).
-    lead_n = max(int(n * 0.05), 1)
-    ch_floor = [float(np.percentile(np.clip(shifted[:lead_n, ch], 0, None), 90))
-                for ch in range(4)]
-
-    R = pc_lifetrace_peaks_shape(shifted, window=window, sigma=sigma)
-    R01 = np.clip((R + 1.0) / 2.0, 0.0, 1.0)
-    half = max(1, window // 2)
-
-    calls = []
-    for p in peaks:
-        if p < start:
-            continue
-        lo, hi = max(0, p - half), min(n, p + half + 1)
-        seg = shifted[lo:hi]
-        # Fractional area per channel in the window (paper Eq. 5 sums the
-        # whole window, not the single max point).
-        area = seg.sum(axis=0)
-        # Fractional area per channel in the current window.
-        atot = area.sum()
-        if atot <= 1e-9:
-            continue
-        area_frac = area / atot
-        # S = area-weighted peak shape (Eq. 5 in the paper).
-        score = area_frac * R01[p]
-        winner = int(np.argmax(score))
-        # If the winner is 3rd/4th by plain area alone, it is not a real base.
-        sort_desc = np.argsort(area_frac)[::-1]
-        rank = int(np.where(sort_desc == winner)[0][0]) + 1
-        top_h = shifted[p, winner]
-        if top_h < ch_floor[winner] * max(float(min_height_ratio), 0.0):
-            continue
-        if rank >= 3:
-            letter = 'N'
-        else:
-            letter = BASE_LETTERS[winner]
-        calls.append((int(p), letter, float(top_h)))
-
-    # Merge consecutive identical letters that came from one broad peak
-    # (or duplicate apexes of a double-humped LT ridge).
-    merged = []
-    for p, letter, h in calls:
-        if merged and merged[-1][1] == letter and \
-                (p - merged[-1][0]) <= merge_same:
-            prev_x, prev_let, prev_h = merged[-1]
-            # keep the taller apex, same letter
-            if h > prev_h:
-                merged[-1] = (p, letter, h)
-            continue
-        merged.append((p, letter, h))
-
-    # Broad-peak re-detection: a wide Gaussian-like peak can hide several
-    # bases of the same type.  Compare each peak's width to the local spacing
-    # and add bases when 0.45 + width/spacing crosses integer values
-    # (paper's addition rule).
-    if add_broad_peaks and len(merged) >= 2:
-        xs = np.array([c[0] for c in merged], dtype=np.float64)
-        out = []
-        for idx, (p, letter, h) in enumerate(merged):
-            out.append((p, letter, h))
-            if idx + 1 >= len(merged):
-                break
-            gap = merged[idx + 1][0] - p
-            if gap <= 0:
-                continue
-            # local width of THIS peak at LT fall to max/10
-            peak_l = np.argmax(LT[max(0, p - 1):min(n, p + 2)]) + max(0, p - 1)
-            thresh = max(LT[peak_l] / 10.0, 1e-9)
-            left = peak_l
-            while left > 0 and LT[left] > thresh:
-                left -= 1
-            right = peak_l
-            while right < n - 1 and LT[right] > thresh:
-                right += 1
-            width = float(right - left)
-            # local median spacing from up to 10 neighbours each side
-            lo_i, hi_i = max(0, idx - 10), min(len(merged), idx + 11)
-            local_sp = np.diff(xs[lo_i:hi_i]) if hi_i - lo_i >= 2 else np.array([gap])
-            local_sp = local_sp[local_sp > 0]
-            spacing = float(np.median(local_sp)) if len(local_sp) else float(gap)
-            n_add = int(0.45 + width / max(spacing, 1.0))
-            if n_add > 1 and gap >= spacing * 0.6:
-                # place extra copies of this base near the current apex
-                for _ in range(min(n_add - 1, add_broad_max)):
-                    out.append((p, letter, h))
-        merged = sorted(out, key=lambda t: t[0])
-
-    positions = np.array([c[0] for c in merged], dtype=np.int64)
-    sequence = ''.join(c[1] for c in merged)
-    base_groups = [frozenset([l]) if l in 'ACGT' else frozenset()
-                   for l in sequence]
-    intensities = [{l: 1.0} if l in 'ACGT' else {} for l in sequence]
-    return positions, sequence, base_groups, intensities
-
-
-def pc_hybrid_basecall(separated, shifts, snap_rad=6, peak_floor=0.02,
-                       **cur_kw):
-    """Hybrid basecall: current caller's per-channel peaks for recall, snapped
-    onto LifeTrace's combined-trace maxima for position accuracy.
-
-    Benchmark (96 wells, M13 plate, NW identity vs ESD):
-      current caller  mean 78.8%
-      LifeTrace only  mean 77.2%
-      hybrid          mean 80.6%  (beats current on 96/96 wells)
-
-    The current caller detects peaks per channel, so it keeps bases the
-    LifeTrace single combined trace misses (especially homopolymer doublets),
-    but its positions drift from ESD by ~9 scans on average.  LifeTrace's
-    combined trace LT = L^k-norm of trace x peak-shape-factor locates bases
-    to within ~1.5 scans.  Snapping each current peak onto the nearest LT
-    local maximum (within ``snap_rad`` scans) keeps the recall and removes
-    the drift; the base letter is then the strongest dye channel at the
-    snapped position.  Duplicate snaps onto the same LT maximum keep the
-    taller one.
-
-    Returns (positions, sequence, base_groups, intensities) - same contract
-    as pc_call_bases_with_shifts / pc_lifetrace_basecall.
-    """
-    cur_pos, cur_seq, cur_groups, cur_intens = pc_call_bases_with_shifts(
-        separated, shifts, **cur_kw)
-
-    shifted = np.clip(np.asarray(separated, dtype=np.float64), 0, None).copy()
-    for ch in range(4):
-        s = int(shifts[ch])
-        if s != 0:
-            shifted[:, ch] = dsp_shift_channel(shifted[:, ch], s)
-
-    LT = pc_lifetrace_transform(shifted)
-    floor = max(float(np.percentile(LT, 99.5)) * peak_floor, 1e-9)
-    allmax, _ = find_peaks(LT, distance=1, height=floor)
-
-    snapped = []
-    for p in cur_pos:
-        d = np.abs(allmax - p)
-        j = int(np.argmin(d))
-        snapped.append(int(allmax[j]) if d[j] <= snap_rad else int(p))
-
-    bypos = {}
-    for i, p in enumerate(snapped):
-        if p in bypos:
-            if LT[p] > LT[snapped[bypos[p]]]:
-                bypos[p] = i
-        else:
-            bypos[p] = i
-    keep = sorted(bypos.values())
-    positions = np.array([snapped[i] for i in keep], dtype=np.int64)
-
-    sequence = ''
-    base_groups = []
-    intensities = []
-    for p in positions:
-        letter = CHEM_MAP[int(np.argmax(shifted[p]))]
-        sequence += letter
-        base_groups.append(frozenset([letter]))
-        intensities.append({letter: float(shifted[p].max())})
-    return positions, sequence, base_groups, intensities
-
-
-METRIC_TOOLTIPS = {
-    'ESD match': ('ESD accuracy: matched bases / ESD length. Our independently '
-                  'called sequence is aligned to the ESD sequence and we count '
-                  'how many ESD bases we called correctly. Insertions/gaps in '
-                  'our call count as misses. This is the honest ESD accuracy.'),
-    'Independent': ('M13 accuracy: matched bases / M13 reference length (the '
-                    'headline target). Our called sequence is aligned to the '
-                    'M13 reference slice and we count how many reference bases '
-                    'we called correctly. Higher is better.'),
-}
-
-
-def pc_nw_identity(query, reference, match=1, mismatch=-1, gap=-2, max_len=6000):
-    """Global (Needleman-Wunsch) alignment identity between two base-letter
-    strings, in percent. Robust to insertions/deletions via alignment,
-    unlike position-indexed comparison."""
-    q = query[:max_len]
-    r = reference[:max_len]
-    m, n = len(q), len(r)
-    if m == 0 or n == 0:
-        return 0.0
-    dp = np.zeros((m + 1, n + 1), dtype=np.int32)
-    dp[:, 0] = np.arange(m + 1) * gap
-    dp[0, :] = np.arange(n + 1) * gap
-    # Vectorized per-row DP fill. row[j] = max_{k<=j}(A[k] + gap*(j-k))
-    # where A[k] = max(diag[k], up[k]); the running prefix max makes each
-    # row an O(n) numpy pass instead of an O(n) Python loop (~150x faster).
-    r_int = np.frombuffer(r.encode('ascii'), dtype=np.uint8).astype(np.int64)
-    js = np.arange(1, n + 1, dtype=np.int64)
-    gapj = gap * js
-    for i in range(1, m + 1):
-        qi = ord(q[i - 1])
-        prev = dp[i - 1]
-        diag = prev[:-1] + np.where(r_int == qi, match, mismatch)
-        up = prev[1:] + gap
-        pref = np.maximum.accumulate(np.maximum(diag, up) - gapj)
-        dp[i, 0] = prev[0] + gap
-        dp[i, 1:] = pref + gapj
-    i, j = m, n
-    matches = 0
-    aligned = 0
-    while i > 0 or j > 0:
-        if i > 0 and j > 0 and dp[i, j] == dp[i - 1, j - 1] + \
-                (match if q[i - 1] == r[j - 1] else mismatch):
-            aligned += 1
-            if q[i - 1] == r[j - 1]:
-                matches += 1
-            i -= 1
-            j -= 1
-        elif i > 0 and dp[i, j] == dp[i - 1, j] + gap:
-            aligned += 1
-            i -= 1
-        else:
-            aligned += 1
-            j -= 1
-    return 100.0 * matches / aligned if aligned else 0.0
-
-
-def pc_reference_accuracy(query, reference, match=1, mismatch=-1, gap=-2,
-                          max_len=6000):
-    """Matched-bases / reference-length accuracy: the 'match bases / total
-    bases' metric. Runs a global Needleman-Wunsch alignment of the called
-    sequence (query) to the true reference, then counts how many *reference*
-    bases align to an equal query base. Returns ``(matched, total_ref, pct)``
-    where ``pct = 100 * matched / len(reference)``. Insertions and gaps in the
-    query count as misses (they never match a reference base), so this is
-    stricter and more interpretable than alignment identity."""
-    q = query[:max_len]
-    r = reference[:max_len]
-    m, n = len(q), len(r)
-    total_ref = n
-    if m == 0 or n == 0:
-        return 0, total_ref, 0.0
-    dp = np.zeros((m + 1, n + 1), dtype=np.int32)
-    dp[:, 0] = np.arange(m + 1) * gap
-    dp[0, :] = np.arange(n + 1) * gap
-    r_int = np.frombuffer(r.encode('ascii'), dtype=np.uint8).astype(np.int64)
-    js = np.arange(1, n + 1, dtype=np.int64)
-    gapj = gap * js
-    for i in range(1, m + 1):
-        qi = ord(q[i - 1])
-        prev = dp[i - 1]
-        diag = prev[:-1] + np.where(r_int == qi, match, mismatch)
-        up = prev[1:] + gap
-        pref = np.maximum.accumulate(np.maximum(diag, up) - gapj)
-        dp[i, 0] = prev[0] + gap
-        dp[i, 1:] = pref + gapj
-    i, j = m, n
-    matched = 0
-    while i > 0 or j > 0:
-        if i > 0 and j > 0 and dp[i, j] == dp[i - 1, j - 1] + \
-                (match if q[i - 1] == r[j - 1] else mismatch):
-            if q[i - 1] == r[j - 1]:
-                matched += 1
-            i -= 1
-            j -= 1
-        elif i > 0 and dp[i, j] == dp[i - 1, j] + gap:
-            i -= 1
-        else:
-            j -= 1
-    pct = 100.0 * matched / total_ref if total_ref else 0.0
-    return matched, total_ref, pct
-
-
-def pc_estimate_mobility_shifts(raw, ref_channel=3, max_shift=60, smooth=5,
-                                tol=2, min_coinc_frac=0.55):
-    """Estimate per-channel dye-mobility scan shifts by counting peak
-    coincidences against a reference channel.
-
-    Returns (shifts, confidence) where confidence[ch] is the fraction of the
-    channel's peaks that coincide (within ``tol`` scans) with a reference-
-    channel peak after applying the shift.
-
-    WHY PEAK COINCIDENCE (NOT ENVELOPE CROSS-CORRELATION):
-    Envelope cross-correlation is the classic approach, but its peak is
-    broadened by the smoothing window (here ~15 scans, comparable to the
-    5-10 scan lags we want to measure), so it cannot resolve the small
-    mobility lags - and on a read whose channels encode *different* bases
-    it returns a spurious lag such as -38 (see A01 Ch1).  Counting
-    coincident peak *positions* has scan-level resolution.
-
-    VALIDITY GATE: this only recovers a meaningful shift on a mobility /
-    matrix calibration standard where the same fragments are labelled with
-    all four dyes, so every channel shares peak positions.  There, the
-    coincidence fraction at the correct lag is near 1.  On an ordinary
-    sequencing read each channel encodes different bases, so the best lag
-    is a random-coincidence artifact (fraction ~0.3-0.6 depending on peak
-    density).  A shift is accepted only when the best-lag coincidence
-    fraction >= ``min_coinc_frac``; otherwise the channel is left at 0 and
-    the caller should warn the user that the data does not look like a
-    calibration run.
-    """
-    raw = np.asarray(raw, dtype=np.float64)
-    n = len(raw)
-    drift_win = max(51, min(n // 4, 401)) | 1
-    drift = uniform_filter1d(raw, size=drift_win, axis=0, mode='nearest')
-    detrended = np.clip(raw - drift, 0, None)
-    env = uniform_filter1d(detrended, size=max(3, int(smooth)), axis=0)
-    onset = pc_signal_onset(raw, onset_frac=0.05, smooth=40)
-
-    peaks = []
-    for ch in range(4):
-        x = env[:, ch]
-        scale = np.percentile(x, 99.5)
-        p, _ = find_peaks(x, distance=4, prominence=max(scale * 0.03, 1e-9))
-        p = p[p > onset]
-        peaks.append(p)
-
-    ref_p = peaks[ref_channel]
-    shifts = np.zeros(4, dtype=np.int64)
-    confidence = np.zeros(4, dtype=np.float64)
-    for ch in range(4):
-        if ch == ref_channel:
-            confidence[ch] = 1.0
-            continue
-        p = peaks[ch]
-        if len(p) == 0 or len(ref_p) == 0:
-            continue
-        best_lag, best_frac = 0, 0.0
-        for lag in range(-max_shift, max_shift + 1):
-            target = p + lag
-            cnt = 0
-            for tp in target:
-                if np.min(np.abs(ref_p - tp)) <= tol:
-                    cnt += 1
-            frac = cnt / max(min(len(p), len(ref_p)), 1)
-            if frac > best_frac or (frac == best_frac and abs(lag) < abs(best_lag)):
-                best_frac, best_lag = frac, lag
-        if best_frac >= min_coinc_frac:
-            shifts[ch] = best_lag
-            confidence[ch] = best_frac
-    return shifts, confidence
-
-
-# ---------------------------------------------------------------------------
-# Optimizer worker thread (keeps GUI responsive during subprocess.run)
-# ---------------------------------------------------------------------------
-class OptimizerWorker(QThread):
-    """Runs optimize_params.py in a background thread so the Qt main loop
-    stays responsive and the desktop environment doesn't report the window
-    as 'not responding'. Streams stdout line-by-line to the GUI so the user
-    can see optimization progress in real time."""
-
-    finished = pyqtSignal(str)         # out_path or error message
-    stdout_line = pyqtSignal(str)      # progress line from optimize_params.py
-
-    def __init__(self, cmd, out_path, parent=None):
-        super().__init__(parent)
-        self.cmd = cmd
-        self.out_path = out_path
-        self._process = None
-        self._user_cancelled = False
-
-    def run(self):
-        try:
-            proc = subprocess.Popen(
-                self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
-            self._process = proc
-            for line in iter(proc.stdout.readline, ''):
-                if self._user_cancelled:
-                    proc.terminate()
-                    break
-                self.stdout_line.emit(line.rstrip())
-            proc.wait()
-            if self._user_cancelled:
-                self.finished.emit('ERROR: Cancelled by user')
-            elif proc.returncode != 0:
-                raise RuntimeError(
-                    f'optimize_params.py exited with code {proc.returncode}.')
-            else:
-                self.finished.emit(self.out_path)
-        except Exception as e:
-            self.finished.emit(f'ERROR: {e}')
-
-    def cancel(self):
-        self._user_cancelled = True
-
-
-# ---------------------------------------------------------------------------
-# Reference DNA comparison dialog
-# ---------------------------------------------------------------------------
-def _ref_revcomp(seq):
-    comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G', 'N': 'N'}
-    return ''.join(comp.get(b, 'N') for b in seq[::-1])
-
-
-def ref_semiglobal_identity(query, reference):
-    """Free-end-gap Needleman-Wunsch identity against a reference. Terminal
-    overhangs are free (not counted as errors). Returns
-    (identity_pct, matches, mismatches, indels)."""
-    q, r = query, reference
-    m, n = len(q), len(r)
-    if m == 0 or n == 0:
-        return 0.0, 0, 0, 0
-    dp = np.zeros((m + 1, n + 1), dtype=np.int32)
-    tb = np.zeros((m + 1, n + 1), dtype=np.int8)  # 0=diag 1=up 2=left
-    for i in range(1, m + 1):
-        qi = q[i - 1]
-        prev = dp[i - 1]
-        row = dp[i]
-        tbrow = tb[i]
-        for j in range(1, n + 1):
-            diag = prev[j - 1] + (1 if qi == r[j - 1] else -1)
-            up = prev[j] - 2
-            left = row[j - 1] - 2
-            if diag >= up and diag >= left:
-                row[j], tbrow[j] = diag, 0
-            elif up >= left:
-                row[j], tbrow[j] = up, 1
-            else:
-                row[j], tbrow[j] = left, 2
-    i, j = m, int(np.argmax(dp[m, :]))
-    if dp[i, j] < dp[int(np.argmax(dp[:, n])), n]:
-        i, j = int(np.argmax(dp[:, n])), n
-    matches = mismatches = indels = 0
-    while i > 0 and j > 0:
-        d = tb[i, j]
-        if d == 0:
-            if q[i - 1] == r[j - 1]:
-                matches += 1
-            else:
-                mismatches += 1
-            i -= 1
-            j -= 1
-        elif d == 1:
-            indels += 1
-            i -= 1
-        else:
-            indels += 1
-            j -= 1
-    total = matches + mismatches + indels
-    ident = 100.0 * matches / total if total else 0.0
-    return ident, matches, mismatches, indels
-
-
-def ref_local_identity(query, reference):
-    """BLAST-style local (Smith-Waterman, affine-gap) identity against a
-    reference slice. Drops the unreliable Sanger read ends rather than
-    forcing the whole read to align (identical to ref_compare.py).
-
-    Inline copy kept in sync with the CLI. Returns
-    (identity_pct, matches, mismatches, indels, aligned_len, score,
-     ref_start0, ref_end0, read_start0, read_end0, mismatch_list)
-    where ref_* are the best segment's reference span (0-based within the
-    slice) and read_* the read span; bases dropped off the two read ends
-    are read_start0 and len(query)-1-read_end0."""
-    q, r = query, reference
-    m, n = len(q), len(r)
-    if m == 0 or n == 0:
-        return 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, []
-    NEG = -10**9
-    match, mismatch, gopen, gext = 2, -3, 11, 2
-    Mp = [0] * (n + 1)
-    Xp = [NEG] * (n + 1)
-    Yp = [NEG] * (n + 1)
-    TB, V = [], []
-    best = (0, 0, 0)
-    for i in range(1, m + 1):
-        qi = q[i - 1]
-        Mrow = [0] * (n + 1)
-        Xrow = [NEG] * (n + 1)
-        Yrow = [NEG] * (n + 1)
-        trow = [0] * (n + 1)
-        vrow = [0] * (n + 1)
-        for j in range(1, n + 1):
-            base = Mp[j - 1]
-            if Xp[j - 1] > base:
-                base = Xp[j - 1]
-            if Yp[j - 1] > base:
-                base = Yp[j - 1]
-            Mrow[j] = (base if base > 0 else 0) + \
-                (match if qi == r[j - 1] else mismatch)
-            xa = Mp[j] - gopen
-            xb = Xp[j] - gext
-            Xrow[j] = xa if xa > xb else xb
-            ya = Mrow[j - 1] - gopen
-            yb = Yrow[j - 1] - gext
-            Yrow[j] = ya if ya > yb else yb
-            v = Mrow[j]
-            if Xrow[j] > v:
-                v = Xrow[j]
-            if Yrow[j] > v:
-                v = Yrow[j]
-            vrow[j] = v
-            trow[j] = 0 if v == Mrow[j] else (1 if v == Xrow[j] else 2)
-            if v > best[0]:
-                best = (v, i, j)
-        TB.append(trow)
-        V.append(vrow)
-        Mp, Xp, Yp = Mrow, Xrow, Yrow
-    _, i, j = best
-    matches = mismatches = indels = 0
-    mism = []
-    ref_hits = []
-    read_hits = []
-    while i > 0 and j > 0:
-        v = V[i - 1][j]
-        if v <= 0:
-            break
-        d = TB[i - 1][j]
-        if d == 0:
-            qb, rb = q[i - 1], r[j - 1]
-            read_hits.append(i - 1)
-            ref_hits.append(j - 1)
-            if qb == rb:
-                matches += 1
-            else:
-                mismatches += 1
-                mism.append((i - 1, qb, rb, j - 1))
-            i -= 1
-            j -= 1
-        elif d == 1:
-            indels += 1
-            read_hits.append(i - 1)
-            i -= 1
-        else:
-            indels += 1
-            ref_hits.append(j - 1)
-            j -= 1
-    aligned = matches + mismatches + indels
-    ident = 100.0 * matches / aligned if aligned else 0.0
-    rlo = min(ref_hits) if ref_hits else 0
-    rhi = max(ref_hits) if ref_hits else 0
-    qlo = min(read_hits) if read_hits else 0
-    qhi = max(read_hits) if read_hits else len(q) - 1
-    return ident, matches, mismatches, indels, aligned, best[0], \
-        rlo, rhi, qlo, qhi, mism
-
-
 class ReferenceDialog(QDialog):
     """Paste or load a known reference sequence (e.g. M13) and measure how
     accurate both the ESD basecall and the independent caller are against the
@@ -2437,7 +599,8 @@ class SequencingGUI(QMainWindow):
         self.method_combo = QComboBox()
         self.method_combo.addItems(['Greedy (max-intensity)',
                                     'Per-channel (cluster)',
-                                    'Cimarron (tuned)'])
+                                    'Cimarron (tuned)',
+                                    'Multiview (per-channel)'])
         self.method_combo.setToolTip(
             'Independent basecall strategy.\n\n'
             'Greedy (max-intensity): repeatedly call the strongest peak of '
@@ -2456,7 +619,13 @@ class SequencingGUI(QMainWindow):
             'begin/end detection and the greedy caller. ~95% identity vs the '
             'true M13 reference (DLL ~96%), best result achieved on this '
             'plate. Uses the current Matrix and Mobility Shifts from this '
-            'GUI; baseline/smoothing knobs above do not affect this method.')
+            'GUI; baseline/smoothing knobs above do not affect this method.\n\n'
+            'Multiview (per-channel): every channel gets its own Distance '
+            'and Prominence (panel below), plus an optional combined-'
+            'envelope view whose discoveries fill positions all four '
+            'channels missed. Tune the per-channel numbers against the ESD '
+            'with multiview_peakdetect.py and enter the optimized values '
+            'here to watch the effect live.')
         pdg_g.addWidget(QLabel('Variant:'), 0, 2)
         pdg_g.addWidget(QLabel('Method:'), 0, 0)
         pdg_g.addWidget(self.method_combo, 0, 1)
@@ -2591,6 +760,63 @@ class SequencingGUI(QMainWindow):
         self.fill_margin_spin.valueChanged.connect(self._schedule_update)
         pdg_g.addWidget(QLabel('Fill mrgn:'), 8, 0)
         pdg_g.addWidget(self.fill_margin_spin, 8, 1)
+        # -- Multiview group: independent Distance/Prominence per channel
+        # for the 'Multiview (per-channel)' method, plus the combined-
+        # envelope view. Values are meant to come from
+        # multiview_peakdetect.py's ESD optimization.
+        mvg = QGroupBox('Multiview params')
+        mvg.setToolTip(
+            'Per-channel peak detection parameters for the Multiview '
+            'method. Each row is one dye channel (A, C, G, T); COMB is '
+            'the max-over-channels envelope whose peaks fill positions '
+            'every channel missed (gated by Fill gap / Fill mrgn above). '
+            'Optimized values: python3 multiview_peakdetect.py.')
+        mv_g = QGridLayout(mvg)
+        mv_g.setVerticalSpacing(2)
+        self.mv_dist_spins = []
+        self.mv_prom_spins = []
+        mv_g.addWidget(QLabel(''), 0, 0)
+        mv_g.addWidget(QLabel('Distance'), 0, 1)
+        mv_g.addWidget(QLabel('Prom x1000'), 0, 2)
+        labels = ['A', 'C', 'G', 'T']
+        for ch in range(4):
+            mv_g.addWidget(QLabel(labels[ch]), ch + 1, 0)
+            dspin = QDoubleSpinBox()
+            dspin.setDecimals(2)
+            dspin.setSingleStep(0.5)
+            dspin.setRange(0.1, 1000.0)
+            dspin.setValue(6.0)
+            dspin.valueChanged.connect(self._schedule_update)
+            pspin = QSpinBox()
+            pspin.setRange(1, 10000)
+            pspin.setValue(75)
+            pspin.setSingleStep(5)
+            pspin.valueChanged.connect(self._schedule_update)
+            self.mv_dist_spins.append(dspin)
+            self.mv_prom_spins.append(pspin)
+            mv_g.addWidget(dspin, ch + 1, 1)
+            mv_g.addWidget(pspin, ch + 1, 2)
+        mv_g.addWidget(QLabel('COMB'), 5, 0)
+        self.mv_comb_check = QCheckBox()
+        self.mv_comb_check.setChecked(True)
+        self.mv_comb_check.toggled.connect(self._schedule_update)
+        self.mv_comb_dist_spin = QDoubleSpinBox()
+        self.mv_comb_dist_spin.setDecimals(2)
+        self.mv_comb_dist_spin.setSingleStep(0.5)
+        self.mv_comb_dist_spin.setRange(0.1, 1000.0)
+        self.mv_comb_dist_spin.setValue(8.0)
+        self.mv_comb_dist_spin.valueChanged.connect(self._schedule_update)
+        self.mv_comb_prom_spin = QSpinBox()
+        self.mv_comb_prom_spin.setRange(1, 10000)
+        self.mv_comb_prom_spin.setValue(120)
+        self.mv_comb_prom_spin.setSingleStep(5)
+        self.mv_comb_prom_spin.valueChanged.connect(self._schedule_update)
+        mv_g.addWidget(self.mv_comb_check, 5, 1)
+        mv_g.addWidget(self.mv_comb_dist_spin, 5, 2)
+        mv_g.addWidget(self.mv_comb_prom_spin, 5, 3)
+        self.mv_group = mvg
+        self._set_multiview_enabled(False)
+        sliders_l.addWidget(mvg)
         sliders_l.addWidget(pdg)
 
         # -- Call-region group -- restrict normalization + basecalling to
@@ -2971,6 +1197,14 @@ class SequencingGUI(QMainWindow):
         self._settings.setValue('fill_gap', self.fill_gap_spin.value())
         self._settings.setValue('fill_margin', self.fill_margin_spin.value())
         self._settings.setValue('basecall_method', self.method_combo.currentIndex())
+        for ch in range(4):
+            self._settings.setValue(f'mv_dist_{ch}',
+                                    self.mv_dist_spins[ch].value())
+            self._settings.setValue(f'mv_prom_{ch}',
+                                    self.mv_prom_spins[ch].value())
+        self._settings.setValue('mv_comb_on', self.mv_comb_check.isChecked())
+        self._settings.setValue('mv_comb_dist', self.mv_comb_dist_spin.value())
+        self._settings.setValue('mv_comb_prom', self.mv_comb_prom_spin.value())
         self._settings.setValue('esd_offset', self.esd_offset_spin.value())
         if hasattr(self, 'esd_combo'):
             self._settings.setValue('esd_variant', self.esd_combo.currentText())
@@ -3014,6 +1248,14 @@ class SequencingGUI(QMainWindow):
         restore_spin(self.tol_spin, 'tolerance', 4)
         restore_spin(self.fill_gap_spin, 'fill_gap', 3)
         restore_spin(self.fill_margin_spin, 'fill_margin', 20)
+        for ch in range(4):
+            restore_dspin(self.mv_dist_spins[ch], f'mv_dist_{ch}', 6.0)
+            restore_spin(self.mv_prom_spins[ch], f'mv_prom_{ch}', 75)
+        restore_dspin(self.mv_comb_dist_spin, 'mv_comb_dist', 8.0)
+        restore_spin(self.mv_comb_prom_spin, 'mv_comb_prom', 120)
+        _mvcomb = self._settings.value('mv_comb_on', True)
+        self.mv_comb_check.setChecked(
+            _mvcomb in (True, 'true', 'True', '1', 1))
         _fillin_val = self._settings.value('fill_in', False)
         self.fillin_check.setChecked(_fillin_val in (True, 'true', 'True', '1', 1))
         mpa = self._settings.value('matrix_apply_point', 'smoothed')
@@ -3221,6 +1463,18 @@ class SequencingGUI(QMainWindow):
             self.fill_gap_spin.setValue(int(settings_dict['fill_gap']))
         if 'fill_margin' in settings_dict:
             self.fill_margin_spin.setValue(int(round(float(settings_dict['fill_margin']) * 100.0)))
+        mv_src = settings_dict.get('multiview') or settings_dict
+        if 'ch_params' in mv_src:
+            for ch, pair in enumerate(mv_src['ch_params'][:4]):
+                self.mv_dist_spins[ch].setValue(float(pair[0]))
+                self.mv_prom_spins[ch].setValue(int(pair[1]))
+            comb = mv_src.get('comb_params')
+            if comb:
+                self.mv_comb_dist_spin.setValue(float(comb[0]))
+                self.mv_comb_prom_spin.setValue(int(comb[1]))
+                self.mv_comb_check.setChecked(True)
+            else:
+                self.mv_comb_check.setChecked(False)
         if 'matrix' in settings_dict:
             self._set_matrix(np.array(settings_dict['matrix']))
         if 'mobility_shifts' in settings_dict:
@@ -3327,6 +1581,14 @@ class SequencingGUI(QMainWindow):
             'fill_in': self.fillin_check.isChecked(),
             'fill_gap': self.fill_gap_spin.value(),
             'fill_margin': self.fill_margin_spin.value() / 100.0,
+            'multiview': {
+                'ch_params': [[self.mv_dist_spins[c].value(),
+                               self.mv_prom_spins[c].value()]
+                              for c in range(4)],
+                'comb_params': [self.mv_comb_dist_spin.value(),
+                                self.mv_comb_prom_spin.value()]
+                if self.mv_comb_check.isChecked() else None,
+            },
             'matrix': self._get_matrix().tolist(),
             'mobility_shifts': self._get_mobility_shifts(),
             'esd_offset': self.esd_offset_spin.value(),
@@ -3721,6 +1983,13 @@ class SequencingGUI(QMainWindow):
         self.region_hybrid_check.setEnabled(auto)
         self._schedule_update()
 
+    def _set_multiview_enabled(self, on):
+        """Grey out the Multiview parameter panel unless that method is
+        selected (the values are meaningless for the other methods)."""
+        if not hasattr(self, 'mv_group'):
+            return
+        self.mv_group.setEnabled(bool(on))
+
     def _on_method_changed(self, index):
         """Apply the factory parameter preset for the chosen basecall
         method. Fires when the user switches methods (saved settings are
@@ -3733,8 +2002,14 @@ class SequencingGUI(QMainWindow):
             self.distance_spin.setValue(5)
             self.prominence_spin.setValue(75)      # prominence_frac 0.075
             self.norm_window_spin.setValue(2000)
+        elif index == 3:  # Multiview (per-channel): shared-param starting
+            # point; replace with multiview_peakdetect.py output.
+            self.distance_spin.setValue(6)
+            self.prominence_spin.setValue(75)      # prominence_frac 0.075
+            self.norm_window_spin.setValue(800)
         # index 2 = Cimarron (tuned): DSP settings are fixed inside the
         # engine; the peak-call spins are unused so leave them untouched.
+        self._set_multiview_enabled(index == 3)
 
     def _call_bases(self, separated, shifts, region):
         """Run the independent basecall with the currently selected method,
@@ -3742,6 +2017,22 @@ class SequencingGUI(QMainWindow):
         idx = self.method_combo.currentIndex()
         if idx == 2:
             return self._call_bases_cimarron()
+        if idx == 3:
+            return mvpd.detect_multiview(
+                separated, shifts,
+                ch_params=[(self.mv_dist_spins[c].value(),
+                            self.mv_prom_spins[c].value())
+                           for c in range(4)],
+                comb_params=(self.mv_comb_dist_spin.value(),
+                             self.mv_comb_prom_spin.value())
+                if self.mv_comb_check.isChecked() else None,
+                tolerance=max(1, self.tol_spin.value()),
+                norm_window=max(1, self.norm_window_spin.value()),
+                min_signal_frac=self.ambig_spin.value() / 100.0,
+                fill_gap=max(1, self.fill_gap_spin.value()),
+                fill_margin_pct=float(self.fill_margin_spin.value()),
+                region=region,
+            )
         if idx == 0:
             return pc_call_bases_greedy(
                 separated, shifts,
@@ -4090,24 +2381,35 @@ class SequencingGUI(QMainWindow):
                 pos, iupac_seq, base_groups, intens = self._call_bases(
                     separated, shifts, region)
                 # Fill-in: re-run peak detection on the combined envelope and
-                # add clean positions the cluster-merge dropped (e.g. the G
-                # next to a taller T only 3 scans away). Drawn in orange so
-                # you can see exactly which bases the fill-in added. Only
-                # relevant for the per-channel cluster method - the greedy
-                # caller already resolves tight peaks.
+                # add clean positions the per-channel merge dropped (e.g. the
+                # G next to a taller T only 3 scans away), or - for the
+                # greedy caller - recover shoulder bases whose apex the
+                # +/-Distance excision blanked (e.g. a clean C hiding on a
+                # taller neighbor's flank). Drawn in orange so you can see
+                # exactly which bases the fill-in added.
                 fillin_pos = []
-                if (self.method_combo.currentIndex() == 1
-                        and self.fillin_check.isChecked()):
-                    fillin_add = pc_fill_in_combined_peaks(
-                        separated, shifts,
-                        positions=[int(p) for p in pos],
-                        min_distance=max(1, self.distance_spin.value()),
-                        prominence_frac=self.prominence_spin.value() / 1000.0,
-                        norm_window=max(1, self.norm_window_spin.value()),
-                        fill_gap=max(1, self.fill_gap_spin.value()),
-                        fill_margin=self.fill_margin_spin.value() / 100.0,
-                        region=region,
-                    )
+                fillin_add = None
+                if self.fillin_check.isChecked():
+                    if self.method_combo.currentIndex() == 1:
+                        fillin_add = pc_fill_in_combined_peaks(
+                            separated, shifts,
+                            positions=[int(p) for p in pos],
+                            min_distance=max(1, self.distance_spin.value()),
+                            prominence_frac=self.prominence_spin.value() / 1000.0,
+                            norm_window=max(1, self.norm_window_spin.value()),
+                            fill_gap=max(1, self.fill_gap_spin.value()),
+                            fill_margin=self.fill_margin_spin.value() / 100.0,
+                            region=region,
+                        )
+                    elif self.method_combo.currentIndex() == 0:
+                        fillin_add = pc_fill_in_shoulders(
+                            separated, shifts,
+                            positions=[int(p) for p in pos],
+                            norm_window=max(1, self.norm_window_spin.value()),
+                            fill_gap=max(1, self.fill_gap_spin.value()),
+                            fill_margin=self.fill_margin_spin.value() / 100.0,
+                            region=region,
+                        )
                     if fillin_add:
                         merged = sorted(
                             [(int(p), letter) for p, letter in zip(pos, iupac_seq)]

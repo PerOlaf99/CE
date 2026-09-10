@@ -1,0 +1,82 @@
+{
+  "band_high": 0,
+  "band_low": 0,
+  "band_order": 2,
+  "basecall_method": 0,
+  "baseline_method": "AsyLS",
+  "baseline_window": 50010,
+  "baseline_window2": 1,
+  "esd_offset": 0,
+  "fill_gap": 3,
+  "fill_in": false,
+  "fill_margin": 0.2,
+  "matrix": [
+    [
+      1.0,
+      1.0,
+      0.26,
+      0.46
+    ],
+    [
+      0.07,
+      1.0,
+      0.075,
+      0.006
+    ],
+    [
+      0.38,
+      0.33,
+      1.0,
+      1.52
+    ],
+    [
+      0.27,
+      0.26,
+      0.189,
+      1.0
+    ]
+  ],
+  "matrix_apply_point": "smoothed",
+  "min_distance": 6,
+  "min_signal_frac": 0.25,
+  "mobility_shifts": [
+    5,
+    11,
+    10,
+    10
+  ],
+  "multiview": {
+    "ch_params": [
+      [
+        6.0,
+        75
+      ],
+      [
+        6.0,
+        75
+      ],
+      [
+        6.0,
+        75
+      ],
+      [
+        6.0,
+        75
+      ]
+    ],
+    "comb_params": [
+      8.0,
+      120
+    ]
+  },
+  "norm_window": 800,
+  "prominence_frac": 0.2,
+  "reference_dna": "",
+  "reference_end": 0,
+  "reference_name": "",
+  "reference_start": 0,
+  "smooth_method": "Butterworth",
+  "smooth_order": 9,
+  "smooth_window": 5,
+  "tolerance": 4
+}

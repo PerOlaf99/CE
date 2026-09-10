@@ -56,3 +56,9 @@ wineprefix/
 winedll/
 wine_out/
 *.npz.bak
+
+# Raw plate instrument data (too large for the repo; regenerable from the .ab1/.rsd sources)
+MB1000_M13_DT/
+
+# Local optimization job produces
+sanger_toolkit/opt_windows_labels*/

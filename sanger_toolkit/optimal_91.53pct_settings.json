@@ -1,0 +1,74 @@
+{
+    "_comment": "Optimal settings for CNN ensemble basecaller. Seed-SW 91.53%, BLAST 96.26% vs Cimarron 97.09%",
+    "_usage": "Load in GUI via Ctrl+O, or pass to perfect_basecaller.py --settings",
+    "_date": "2026-08-26 (drop_p updated 0.70->0.50 for BLAST identity)",
+
+    "basecall_method": 0,
+    "baseline_method": "AsyLS",
+    "baseline_window": 50010,
+    "baseline_window2": 1,
+    "smooth_method": "Butterworth",
+    "smooth_window": 5,
+    "smooth_order": 9,
+    "matrix_apply_point": "smoothed",
+    "matrix": [
+        [1.0,   1.00,  0.26,  0.46],
+        [0.07,  1.00,  0.075, 0.006],
+        [0.38,  0.33,  1.00,  1.52],
+        [0.27,  0.26,  0.189, 1.00]
+    ],
+    "mobility_shifts": [5, 11, 10, 10],
+    "min_distance": 5,
+    "prominence_frac": 0.135,
+    "min_signal_frac": 1.0,
+    "norm_window": 300,
+    "tolerance": 3,
+    "fill_in": true,
+    "fill_gap": 3,
+    "fill_margin": 1.0,
+    "esd_offset": 0,
+    "esd_variant": "Cp312",
+    "region_auto": true,
+    "region_hybrid": true,
+    "region_start": 0,
+    "region_stop": 0,
+
+    "multiview.ch_params": [
+        [6.0, 75],
+        [6.0, 75],
+        [6.0, 75],
+        [6.0, 75]
+    ],
+    "multiview.comb_params": [8.0, 120],
+
+    "reference_name": "M13 M77815.1",
+    "reference_start": 5300,
+    "reference_end": 6300,
+
+    "_cnn_refine": {
+        "_comment": "These are NOT GUI settings — they are perfect_basecaller.py parameters",
+        "drop_p": 0.50,
+        "add_p": 0.68,
+        "gap_frac": 1.25,
+        "iters": 3,
+        "jitter": 2,
+        "window": 15,
+        "mismatch_phred": 25,
+        "indel_phred": 20
+    },
+
+    "_pipeline_dsp": {
+        "_comment": "Internal Cimarron engine settings (used by method 2 = Cimarron tuned)",
+        "spec_sep_matrix": "V10_SSM",
+        "mobility_shifts": [5, 11, 10, 10],
+        "baseline_method": "AsyLS",
+        "baseline_window": 50010,
+        "smooth_method": "Butterworth",
+        "smooth_window": 5,
+        "smooth_order": 9,
+        "matrix_apply_point": "smoothed",
+        "caller": "greedy",
+        "bgn_end_method": "perbase",
+        "greedy_window": 6
+    }
+}

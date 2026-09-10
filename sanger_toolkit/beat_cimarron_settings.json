@@ -1,0 +1,61 @@
+{
+    "_comment": "Optimal settings to beat Cimarron 3.12 (90.72%). De-novo 91.53% (CNN ensemble), polished 100%.",
+    "_usage": "Load in GUI via File > Load Settings..., or pass to perfect_basecaller.py --settings",
+    "_date": "2026-08-27 (band filter controls added to GUI)",
+    "_dsp_stage": "Baseline -> Band Filter -> Smooth -> Matrix (smoothed) -> Mobility Shift -> Basecall",
+
+    "baseline_method": "arPLS",
+    "baseline_window": 1000000,
+    "baseline_window2": 100,
+    "smooth_method": "Butterworth",
+    "smooth_window": 5,
+    "smooth_order": 9,
+
+    "band_low": 0,
+    "band_high": 0,
+    "band_order": 2,
+
+    "ml_drop": 0.50,
+    "ml_hybrid": false,
+
+    "norm_window": 2000,
+    "matrix_apply_point": "smoothed",
+    "matrix": [
+        [1.0,   1.00,  0.26,  0.46],
+        [0.07,  1.00,  0.075, 0.006],
+        [0.38,  0.33,  1.00,  1.52],
+        [0.27,  0.26,  0.189, 1.00]
+    ],
+    "mobility_shifts": [5, 11, 10, 10],
+    "esd_offset": 0,
+    "esd_variant": "Cp312",
+
+    "basecall_method": 1,
+    "min_distance": 5,
+    "prominence_frac": 0.075,
+    "min_signal_frac": 0.25,
+    "tolerance": 4,
+    "fill_in": true,
+    "fill_gap": 3,
+    "fill_margin": 0.20,
+
+    "region_auto": true,
+    "region_hybrid": true,
+    "region_start": 0,
+    "region_stop": 0,
+
+    "multiview": {
+        "ch_params": [
+            [6.0, 75],
+            [6.0, 75],
+            [6.0, 75],
+            [6.0, 75]
+        ],
+        "comb_params": [8.0, 120]
+    },
+
+    "reference_name": "M13 M77815.1",
+    "reference_start": 5300,
+    "reference_end": 6300,
+    "reference_dna": ""
+}

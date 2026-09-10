@@ -1,0 +1,61 @@
+{
+  "well": "A01",
+  "region_start": 8800,
+  "region_stop": 9000,
+  "baseline_method": "SNIP",
+  "baseline_window": 385,
+  "baseline_window2": 0,
+  "smooth_method": "Wavelet",
+  "smooth_window": 3,
+  "smooth_order": 167,
+  "matrix_apply_point": "raw",
+  "mobility_shifts": [
+    0,
+    2,
+    3,
+    -2
+  ],
+  "matrix": [
+    [
+      0.8978881927656004,
+      0.19434732471616165,
+      0.17853944336398697,
+      0.014543881770392671
+    ],
+    [
+      0.01718713587113657,
+      0.24204543360696967,
+      0.17853944336398697,
+      0.015472214649353907
+    ],
+    [
+      0.04347334367405132,
+      0.2818036208384343,
+      0.4860228145582194,
+      0.008973884496625267
+    ],
+    [
+      0.04145132768921172,
+      0.2818036208384343,
+      0.15689829871380673,
+      0.9610100190836282
+    ]
+  ],
+  "esd_offset": 2008,
+  "esd_variant": "Cp312",
+  "basecall_method": 0,
+  "min_distance": 1.763920546873229,
+  "prominence_frac": 0.16244171531099383,
+  "norm_window": 1576,
+  "min_distance_floor": 2.651441496617376,
+  "fill_gap": 4,
+  "fill_margin": 0.2,
+  "fill_in": true,
+  "band_low": 0,
+  "band_high": 0,
+  "band_order": 2,
+  "esd_matches": 31,
+  "esd_aln": 37,
+  "esd_ident_pct": 83.78,
+  "optimized_score": 31.0
+}

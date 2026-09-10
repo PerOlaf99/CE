@@ -1,0 +1,61 @@
+{
+  "well": "A01",
+  "region_start": 8050,
+  "region_stop": 8250,
+  "baseline_method": "Morphological (Top-hat)",
+  "baseline_window": 401,
+  "baseline_window2": 0,
+  "smooth_method": "LOWESS",
+  "smooth_window": 53,
+  "smooth_order": 3,
+  "matrix_apply_point": "none",
+  "mobility_shifts": [
+    -3,
+    -9,
+    7,
+    0
+  ],
+  "matrix": [
+    [
+      0.263443431230422,
+      0.15408249029326299,
+      0.10656996074217502,
+      0.1150366238888281
+    ],
+    [
+      0.12397486801072105,
+      0.3990782878562744,
+      0.10656996074217502,
+      0.12237938711577459
+    ],
+    [
+      0.31358348967417676,
+      0.22341961092523127,
+      0.6932076887725265,
+      0.07098004452714926
+    ],
+    [
+      0.29899821108468017,
+      0.22341961092523127,
+      0.0936523897431235,
+      0.691603944468248
+    ]
+  ],
+  "esd_offset": 2008,
+  "esd_variant": "Cp312",
+  "basecall_method": 0,
+  "min_distance": 1.9515731811624555,
+  "prominence_frac": 0.19710377379842037,
+  "norm_window": 71,
+  "min_distance_floor": 2.1626780316949428,
+  "fill_gap": 4,
+  "fill_margin": 0.2,
+  "fill_in": true,
+  "band_low": 0,
+  "band_high": 0,
+  "band_order": 2,
+  "esd_matches": 32,
+  "esd_aln": 34,
+  "esd_ident_pct": 94.12,
+  "optimized_score": 32.0
+}
