@@ -1109,3 +1109,23 @@ ESD, far below GRAFT.  Remaining GRAFT errors = **6 tail bases** (scans
 - `sanger_toolkit/train_data_gen.py` — training data generator
 - `sanger_toolkit/m13_internal_controls.json` — uniform plate deviations
 - `sanger_toolkit/train_data/batch.npz` + `batch_meta.json` — smoke test output
+
+---
+
+## 2026-09-10 (overnight) — Honest window/overlap grids + drift-fabrication finding
+- **Finding**: 78.3% (615 of 785) of the old `od_whole_m13` "ok=True" matches were
+  drift-fabricated (|window_start - anchor| > 5, up to ±39 scans).  The old
+  "head 100% / 99.3% composite" figures were inflated by the window wandering to
+  a different region that coincidentally printed the M13 target.
+- The MAX_DRIFT clamp (prior commit) exposes the honest per-base duplex
+  accuracy; can no longer invent the reference.
+- New overnight tooling (all run in background):
+  - `sanger_toolkit/duplex_window_grid.py` — 200 A01 positions, honest duplex,
+    bins accuracy by actual window width, |drift|, and region; reports
+    trustworthy (|drift|<=5) accuracy.
+  - `sanger_toolkit/nplex_grid.py` — N-plex (2/3/5/7/10 peaks) vs
+    (target window width) grid; target N-mer matched as a contiguous substring
+    of the greedy output (window is wider than the N-mer).
+  - Logs: `sanger_toolkit/duplex_window_grid_log.txt`, `sanger_toolkit/nplex_grid_log.txt`.
+- Results land in `sanger_toolkit/duplex_window_grid.json`,
+  `sanger_toolkit/nplex_grid.json` when each run finishes.
