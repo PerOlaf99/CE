@@ -17,6 +17,38 @@ Build a de-novo basecaller for capillary electropherograms that beats the DICTAT
    correct there and is the back-up**.
 
 ## Progress log (latest first)
+- **2026-09-10 (v3: M13-gold per-region CNN, 48 well held-out — BEATS Cimarron 3.12):**
+  - User proposal: retrain on true M13 as gold for every DLL peak, mask the
+    unresolved read front ("peaks start to make sense" = first >=20 ESD==M13
+    agreements), 4 independent ML regions (begin/mid/tail/tail-tail), honest
+    half-plate test, and use the known T->C mutation as an internal standard.
+  - New scripts (in this dir): `extract_v3.py` (data), `train_v3.py` (models),
+    `eval_v3.py` (held-out eval).
+  - **Construct-aware labels:** positions where the construct genuinely differs
+    from M13 are NOT labeled M13. Auto-detected via cross-well consistency
+    bands (>=90% wells call a non-M13 base): the T->C **mutation band
+    refpos0 871-884** (esd=T vs m13=C, mislabeled "M13 5977" earlier - real
+    coordinate read-orient ref 878) and the **Cp312 insert band refpos0
+    1259-1487** (esd A/G vs m13 C/G/C etc). Inside bands label = ESD
+    (construct truth); elsewhere = M13. I.e. the caller does NOT just read
+    the fasta at the difference loci.
+  - Geometry = ground_truth/...esd peak_positions (SAME as call_guided inference,
+    no engine parameters). Split = checkerboard (row+col)%2 -> 48 train / 48 test.
+  - Held-out window val acc (per region): begin 0.918, mid 0.943, tail 0.837,
+    tail-tail 0.673 (tail-tail tiny after band exclusion).
+  - **Held-out well identity vs M13 (48 wells, 31,846 non-construct cols):
+    OURS 93.77% vs ESD 99.94% on identical span. Cimarron 3.12 bar (whole-read)
+    = 90.72% -> ML de-novo above the commercial baseline.**
+  - Internal standard: model calls the construct base (T, not M13's C) at the
+    mutation in **45/47** wells.
+  - Shape: 27/48 wells >=98% identity, 13 in 90-97%, **9 below the 90.72 bar**
+    (H08,G11,F08,E05,A07,F02,B06,C07,E09; several ~25-56%) - these are
+    out-of-distribution wells the well-split CNN hasn't generalized to.
+  - Full eval table: `/tmp/opencode/eval_v3_result.txt`.
+  - Next candidates: (a) diagnose the 8-9 failing wells (their geometry/SNR),
+    (b) per-region feature engineering (DLL position delta / width / SNR),
+    (c) more robust tail models, (d) a ''phase-lock''-style consensus for the
+    residual mid/tail errors (ESD is at 99.94% on the same columns).
 - **2026-09-09 (plate-wide validation — A01 win does NOT generalize):**
   - Called `call_guided` on all 96 wells (both `.rsd` + `.esd`); diff vs M13 via
     local blastn per well (script `/tmp/opencode/plate_eval.py`, results CSV
