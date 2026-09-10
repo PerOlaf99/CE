@@ -1,0 +1,29 @@
+{
+  "idx": 25,
+  "scan": 2246,
+  "expected": "TC",
+  "called": "TC",
+  "ok": true,
+  "window": [
+    2233,
+    2245
+  ],
+  "pos": [
+    2238,
+    2244
+  ],
+  "el": 0.7,
+  "min_distance": 4.840179657257659,
+  "prom": 0.16113041017339824,
+  "norm": 2730.661455592201,
+  "floor": 4.826494636687477,
+  "baseline": "Rolling Median",
+  "smooth": "Butterworth",
+  "apply_pt": "corrected",
+  "shifts": [
+    -5,
+    2,
+    2,
+    2
+  ]
+}

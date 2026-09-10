@@ -1,0 +1,71 @@
+{
+  "well": "A01",
+  "duplex": 1,
+  "anchor_scan": 7573,
+  "window_start": 7578,
+  "window_stop": 7586,
+  "window_len": 8,
+  "expected": "CA",
+  "esd_target": "TC",
+  "called": "CA",
+  "called_pos": [
+    7579,
+    7585
+  ],
+  "expected_scans": [
+    7573,
+    7580
+  ],
+  "ok": true,
+  "baseline_method": "Rolling Median",
+  "baseline_window": 510,
+  "baseline_window2": 27,
+  "smooth_method": "Butterworth",
+  "smooth_window": 4,
+  "smooth_order": 5,
+  "matrix_apply_point": "smoothed",
+  "mobility_shifts": [
+    2,
+    10,
+    9,
+    9
+  ],
+  "matrix": [
+    [
+      1.0,
+      0.8,
+      0.0,
+      0.01
+    ],
+    [
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.2,
+      0.27,
+      1.0,
+      1.26
+    ],
+    [
+      0.16,
+      0.26,
+      0.22,
+      1.0
+    ]
+  ],
+  "min_distance": 3.935210913882665,
+  "prominence_frac": 0.11323150432283086,
+  "norm_window": 2718.9665562276864,
+  "min_distance_floor": 5.782527617312335,
+  "fill_gap": 4,
+  "fill_margin": 0.2,
+  "fill_in": true,
+  "band_low": 0,
+  "band_high": 0,
+  "band_order": 2,
+  "optimized_score": -139.42999999999998,
+  "elapsed_s": 6.6
+}

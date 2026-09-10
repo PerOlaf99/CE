@@ -1,0 +1,17 @@
+{
+  "idx": 9,
+  "scan": 2130,
+  "m13_idx": 6,
+  "expected": "TG",
+  "called": "TG",
+  "ok": true,
+  "window": [
+    2119,
+    2136
+  ],
+  "pos": [
+    2119,
+    2126
+  ],
+  "el": 0.7
+}

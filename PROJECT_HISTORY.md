@@ -3,7 +3,7 @@
 *Supersedes `SESSION_LOG_perfect_basecaller.md` + `PROGRESS_REPORT.md` (both archived in `99_archive/`).*
 *Deep-dive companion: `03_cimarron312_dll_90.72pct/CIMARRON_MASTER.md` (DLL reverse engineering).*
 
-**Last updated:** 2026-09-03 · **Workspace:** `/media/per/78B0C7DE1FA7081C/electropherogram` (USB stick, NTFS)
+**Last updated:** 2026-09-10 · **Workspace:** `/media/per/78B0C7DE1FA7081C/electropherogram` (USB stick, NTFS)
 
 ---
 
@@ -971,3 +971,82 @@ over 2050-9350 -> 81 windows (step 90). Fewer peaks per window should make param
 optimization easier; in clean regions params should barely change. Estimated
 ~30 min/window -> ~36-39 h overnight run. Must launch detached + per-window JSON
 output so partial results survive and we can inspect along the way.
+
+---
+
+## 2026-09-10 — 2-peak duplex self-correcting search (A01 head/tail) + M13-anchored composite read
+
+### Context
+The user expects the read to start at the polylinker `CAAGCTTGCA` (scan ~2090) and
+flags the first peaks (~2080) as unseparated fragments ("inferring bases is guess
+work").  A new reference `M13_bit_longer.md` (900 bp) was added: the M13.md
+amplicon with the 13-bp primer tail `CGACGGCCAGTGC` prepended and ~60 bp appended
+at the 3' end.  `optimize_duplex.py` was extended with a reference-anchored mode.
+
+### Layer-0 fact-check (verifies the user's mental model is inverted for CAAGTT)
+- `CAAGTT` in **M13_bit_longer.md** = index **601** → ESD idx **593** → scans
+  **7633-7677** (NOT 2090).  Prepending primer bases only shifts the M13 coordinate;
+  the trace read is fixed 1:1 (forward strand, verified 841/841).
+- The ~2082 scan region IS the read start: ESD base 0 = `G` @ 2082
+  (`GCAGCAGCTTGA...`).  The primer tail + polylinker start `CAAGCTTGCA`
+  (M13 idx 13) falls in the unseparated-fragment band (< resolution), exactly as
+  the user predicted.
+
+### Head diagnosis with the user's `A01 2090_2140.json`
+Greedy reads `CAAGTTGCT` (peaks 2092..2130): first 4 bases right, then a
+**double-call of one fused G lobe** (T@2115 + T@2120, one physical base) and a
+raw-vs-normalized argmax mislabel.  Swept 20+ matrix/baseline/smooth combos and
+min_distance 4-10 / prominence 0.02-0.08: **nothing yields `CAAGCTTGCA`** — the
+head lobes (~10 scans wide, ~5 scans apart) exceed any max-intensity greedy's
+resolution.  Not a tuning gap; a physical one.
+
+### End-to-end duplex sweeps (A01, frozen per-window DSP)
+New CLI modes: `--m13-idx` (expected pairs = M13 ref, reference-anchored),
+`--scan-anchor`, `--spacing`, plus a multiprocessing `workers` fix (route the
+pool through the module-level `_obj_worker`/`GLOBAL['ctx']`, the closure was not
+picklable).  Drivers: `sanger_toolkit/od_whole.py` (ESD-anchored),
+`sanger_toolkit/od_whole_m13.py` (M13-anchored) — per-duplex JSON in
+`sanger_toolkit/od_whole/` and `od_whole_m13/`.
+
+| sweep | targets | self-match | stitched vs M13 |
+|---|---|---|---|
+| ESD-anchored (838 pairs) | ESD read duplexes | 96.8% | = ESD (no headroom: self-referential) |
+| M13-anchored | M13 pairs (global-align coords) | 96.9% | mid 100%; **tail 8600-9400 68.4%→81.1%** |
+
+SELF-REFERENCE CAVEAT: ESD-derived duplex targets can't fix ESD's own errors;
+M13 targets fix them exactly where the trace still contains the true base.
+
+### GRAFT composite read = best result
+Rule: take the M13-anchored duplex call where its 2-peak window matched exactly,
+else fall back to the ESD base.  vs M13 (global alignment, 810 aligned bp):
+
+| band |  ESD | GRAFT |
+|---|---|---|
+| 2082-2400 (head) | 97.6% | **100.0%** |
+| 2400-7000 | ~100% | **100.0%** |
+| 7000-8600 | 100% | **100.0%** |
+| 8600-9400 (tail) | 84.2% | **93.8%** |
+| **TOTAL** | **97.9%** | **99.3%** |
+
+### CNN verdict on the problem bands (`sanger_toolkit/ml_tail.py`)
+V4 CNN ensemble (`base_caller_model_v4_{clean,pos,pos_b}.keras`) re-called every
+ESD position from raw 31x4 windows.  CNN is **not** the fix (it is trained on ESD
+labels, so it mirrors ESD's tail errors): head 92.9%, tail 70.8% — both *below*
+ESD, far below GRAFT.  Remaining GRAFT errors = **6 tail bases** (scans
+~9092-9274), CNN confidence ≤0.66 there — the trace genuinely lacks those bases
+(hard physical limit, not DSP/ML recoverable).
+
+### Decisions / take-aways
+- Head is now fully recoverable (100%) via the M13-anchored duplex graft.
+- Mid is perfect; nothing left to optimize there.
+- Tail is down to 93.8%; the last ~6 bases are not in the trace (dying signal).
+- M13-as-reference beats ESD-as-reference for duplex targets; ESD-anchored is
+  self-referential dead weight.  A duplex search only `--m13-idx`-half of the
+  read would have been enough — run it once, graft, done.
+
+### Artifacts (this session)
+- `M13_bit_longer.md` (900 bp primer-extended reference)
+- `sanger_toolkit/A01 2090_2140.json` (user's head-tuned settings)
+- `sanger_toolkit/optimize_duplex.py` (new `--m13-idx` mode + workers fix)
+- `sanger_toolkit/od_whole{,_m13}.py`, `sanger_toolkit/ml_tail.py`
+- `sanger_toolkit/od_whole/`, `sanger_toolkit/od_whole_m13/`, per-duplex JSON

@@ -1,0 +1,17 @@
+{
+  "idx": 1,
+  "scan": 2086,
+  "m13_idx": 0,
+  "expected": "CA",
+  "called": "CA",
+  "ok": true,
+  "window": [
+    2054,
+    2067
+  ],
+  "pos": [
+    2055,
+    2063
+  ],
+  "el": 0.8
+}

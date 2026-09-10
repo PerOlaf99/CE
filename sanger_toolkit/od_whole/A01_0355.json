@@ -1,0 +1,29 @@
+{
+  "idx": 355,
+  "scan": 5289,
+  "expected": "GT",
+  "called": "GT",
+  "ok": true,
+  "window": [
+    5279,
+    5294
+  ],
+  "pos": [
+    5279,
+    5288
+  ],
+  "el": 0.6,
+  "min_distance": 6.625101318917199,
+  "prom": 0.4031155502059577,
+  "norm": 3004.454676662367,
+  "floor": 4.230547047564926,
+  "baseline": "airPLS",
+  "smooth": "Butterworth",
+  "apply_pt": "offset",
+  "shifts": [
+    -5,
+    1,
+    1,
+    1
+  ]
+}

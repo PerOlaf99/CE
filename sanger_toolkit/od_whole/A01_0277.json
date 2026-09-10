@@ -1,0 +1,29 @@
+{
+  "idx": 277,
+  "scan": 4477,
+  "expected": "TG",
+  "called": "TG",
+  "ok": true,
+  "window": [
+    4470,
+    4479
+  ],
+  "pos": [
+    4470,
+    4477
+  ],
+  "el": 0.6,
+  "min_distance": 4.194506191161247,
+  "prom": 0.015611600394956553,
+  "norm": 2917.2850390407602,
+  "floor": 3.7726078930693,
+  "baseline": "airPLS",
+  "smooth": "Butterworth",
+  "apply_pt": "offset",
+  "shifts": [
+    -5,
+    1,
+    1,
+    1
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "idx": 822,
+  "scan": 9216,
+  "expected": "TA",
+  "called": "AA",
+  "ok": false,
+  "window": [
+    9209,
+    9228
+  ],
+  "pos": [
+    9216,
+    9225
+  ],
+  "el": 0.6,
+  "min_distance": 6.42269000399054,
+  "prom": 0.22873648526723053,
+  "norm": 838.9139284294125,
+  "floor": 3.3986137981602367,
+  "baseline": "Rolling Median",
+  "smooth": "Butterworth",
+  "apply_pt": "smoothed",
+  "shifts": [
+    -5,
+    2,
+    1,
+    1
+  ]
+}

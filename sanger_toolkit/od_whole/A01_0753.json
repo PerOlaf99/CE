@@ -1,0 +1,29 @@
+{
+  "idx": 753,
+  "scan": 8781,
+  "expected": "GC",
+  "called": "GC",
+  "ok": true,
+  "window": [
+    8764,
+    8779
+  ],
+  "pos": [
+    8764,
+    8778
+  ],
+  "el": 0.7,
+  "min_distance": 3.3681477899819647,
+  "prom": 0.30993576749094104,
+  "norm": 802.4718108090563,
+  "floor": 4.748086963124729,
+  "baseline": "Rolling Median",
+  "smooth": "Butterworth",
+  "apply_pt": "smoothed",
+  "shifts": [
+    -5,
+    2,
+    1,
+    1
+  ]
+}

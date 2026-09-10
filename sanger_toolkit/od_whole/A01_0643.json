@@ -1,0 +1,29 @@
+{
+  "idx": 643,
+  "scan": 8029,
+  "expected": "GC",
+  "called": "GC",
+  "ok": true,
+  "window": [
+    8019,
+    8036
+  ],
+  "pos": [
+    8020,
+    8032
+  ],
+  "el": 0.8,
+  "min_distance": 8.462647455653546,
+  "prom": 0.07589076946246623,
+  "norm": 1987.4090887819568,
+  "floor": 4.741218019566749,
+  "baseline": "airPLS",
+  "smooth": "Butterworth",
+  "apply_pt": "corrected",
+  "shifts": [
+    -2,
+    2,
+    0,
+    0
+  ]
+}

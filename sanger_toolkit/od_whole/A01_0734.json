@@ -1,0 +1,29 @@
+{
+  "idx": 734,
+  "scan": 8656,
+  "expected": "CA",
+  "called": "CA",
+  "ok": true,
+  "window": [
+    8651,
+    8660
+  ],
+  "pos": [
+    8651,
+    8656
+  ],
+  "el": 0.7,
+  "min_distance": 1.5784034107542233,
+  "prom": 0.14529319203935023,
+  "norm": 3500.311552552388,
+  "floor": 4.0071086873052835,
+  "baseline": "arPLS",
+  "smooth": "Butterworth",
+  "apply_pt": "offset",
+  "shifts": [
+    -3,
+    1,
+    -1,
+    2
+  ]
+}
