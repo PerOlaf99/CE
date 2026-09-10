@@ -95,6 +95,8 @@ def call_duplex(raw, p, region):
 
 def duplex_score(seq, pos, target, exp_scans):
     """Raw score for a 2-peak duplex call vs its target + expected scans."""
+    if len(target) < 2 or len(seq) == 0:
+        return -60.0
     t0, t1 = target[0], target[1]
     s0, s1 = exp_scans
     L = len(seq)
