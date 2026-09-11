@@ -17,6 +17,34 @@ Build a de-novo basecaller for capillary electropherograms that beats the DICTAT
    correct there and is the back-up**.
 
 ## Progress log (latest first)
+- **2026-09-11 (v5 portable "book" caller - no M13/coordinates in the model):**
+  - User concept (built): build the peaker from the raw trace -> annotated peak
+    windows across the WHOLE run (start->tail-tail), as a "book". No manual work:
+    DLL provides every peak scan, ESD provides every base label, cross-well
+    consensus (clone plate) cleans the labels.
+  - Deliverables: `extract_v5.py` (book builder), `train_v5.py` (two-branch CNN),
+    `v5_book.npz` (83,205 windows / 96 wells), models `base_caller_model_v5*.keras`.
+  - **Fix 1 (mobility features):** aux inputs fwhm_norm, spacing_norm, scan_frac
+    (from .esd, per base) fed to a second dense branch - gives the model the
+    DLL/Cimarron-style mobility calibration that per-window z-score destroys.
+  - **Fix 3 (adaptive windows):** window = +/-1.5*fwhm scans around the DLL peak,
+    resampled to 31; width-normalised so broad tail peaks look like sharp mid ones.
+  - **Fix 2 (spacing-guided columns):** consensus labels per travel column via
+    difflib alignment of DLL base strings to a reference well (C03, n=867) - no M13
+    needed. Refpos0 (M13) columns available as side-car for eval only.
+  - **Results vs TRUE M13 gold, 72 fully held-out wells (24-well book):**
+    - M13-anchored columns: start 74.1 / mid **93.6** / tail 71.6 / tail-tail 36.6;
+      DLL baseline 64.6 / 77.2 / 63.3 / 29.6 -> beats DLL in every zone.
+    - Coordinate-free columns: start 65.0 / mid 82.9 / tail 69.8 / tail-tail 40.1;
+      still beats DLL everywhere.
+    - **Internal standard holds**: test-well construct mutation (rp1273, M13=C)
+      called T in 35/37 (M13-anchored labels) and 36/37 (coordinate-free).
+  - **Findings:** the caller is truly portable (raw shape + mobility features only,
+    no plate/reference); label-cleaning power is what M13 columns add (mid 93.6 vs
+    82.9) -> on new plates keep >=1 known anchor for columns; DLL quality_scores are
+    overconfident (~98% everywhere, calls wrong 23% mid / 70% tail-tail);
+    tail-tail ~30-40% is a physics compression limit for everyone.
+  - Eval file `/tmp/opencode/eval_v5_result.txt`.
 - **2026-09-11 (v4 — M13-guided iterative Viterbi relabeling; core accuracy high, coverage gap localized to construct tail):**
   - **The −400 bug:** v3/v2 `refpos0` were systematically off by −400 because
     `semi_global_sw` has a free start (row 0 = 0 everywhere), so it aligned the
