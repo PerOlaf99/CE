@@ -1,6 +1,6 @@
 # Session notes — basecaller vs M13 (pick-up-the-thread doc)
 
-Last updated: 2026-09-09
+Last updated: 2026-09-11
 
 ## Goal / method (agreed with user)
 Build a de-novo basecaller for capillary electropherograms that beats the DICTATOR
@@ -17,6 +17,59 @@ Build a de-novo basecaller for capillary electropherograms that beats the DICTAT
    correct there and is the back-up**.
 
 ## Progress log (latest first)
+- **2026-09-11 (v4 — M13-guided iterative Viterbi relabeling; core accuracy high, coverage gap localized to construct tail):**
+  - **The −400 bug:** v3/v2 `refpos0` were systematically off by −400 because
+    `semi_global_sw` has a free start (row 0 = 0 everywhere), so it aligned the
+    read flush against the window start. Evidence: v3 label vs TRUE M13 = 74%
+    mismatch (uniform), `rb==esd` 97%; true mutation read-orient ~1271-1272
+    (M13 fwd 5977) but v3 band sat at 871-884, exactly −400.
+  - **v4 design (user-approved):** gold = M13 always; ESD/EDL supplies only peak
+    scan geometry; peak→refpos via **Viterbi with CNN emission** (signal picks
+    base, M13 fixes position); construct bands from ≥90% cross-well ESD≠M13, with
+    10% front-column skip and **per-column ESD base** labels (never majority);
+    EM rounds, Round 0 = v3 labels seed.
+  - Fixed coords verified: B10 `rb==ref_rc[rp0]` = 100%, rp0 range 962-1855;
+    window ref 650..2200; mutation band now **1273**, construct/Cp312 band
+    **1695-1882**. `align_cols_v4` uses true resampling indices from `sw_pairs`.
+  - Dataset: r0 81,210; r1 51,352; r2 53,672; r3 53,589 rows. Position moves
+    r0→r1 43%, r1→r2 22.7%, r2→r3 21.5% (slowly converging). E07 skimmed r1 only.
+  - CNN val acc (r3): begin 0.864 / mid 0.938 / tail 0.767 / tailtail 0.627.
+  - **Held-out (48 wells, split==1) label-vs-TRUE-M13: begin 100%, mid 99.7%,
+    tail 62%, tailtail 23%** → the tail labels themselves are NOT M13-resolvable:
+    construct-band votes split 24/24, 17/16/15 (overlap/compression), which is
+    also where ESD made its 32 gaps. CNN-call vs label (test, excl construct
+    band) = 94.05%.
+  - **M13-anchored consensus (begin+mid only, excl construct band):** 546 bp,
+    local blastn vs M77815 = 490 aligned, gapopen 2, **~99.2% identity, bit 904,
+    qcov 90%**. Naive whole-window NCBI consensus = **275 bits/79%** (poisoned
+    by the garbage construct tail). NCBI RID `A89DY34T014`.
+  - **Mutation internal standard: PERFECT** — rp1273 CNN votes 23/23 T (M13=C),
+    the C→T construct edit is called in 100% of held-out wells.
+  - Coverage: 64% of ESD-callable bases are represented as usable test rows; the
+    entire remaining deficit vs ESD/Cimarron is the **construct-tail overlap zone**
+    (1695-1882). Verdict: core (begin+mid) now ~99% accurate vs ESD 95.4%, but
+    full-read coverage still below the Cimarron 3.12 (90.72%) bar.
+  - Files: `extract_v4.py`, `train_v4.py`, `v4_round{0,1,2,3}.npz`,
+    `base_caller_model_v4_r{0,1,2,3}_{begin,mid,tail,tailtail}.keras`,
+    `/tmp/opencode/{consensus_v4_ncbi.py, v4_m13_anchored_consensus.fa,
+    ncbi_v4_result.txt}`.
+  - Next (briefs): (a) construct-anchored tail alignment (align tail peaks to
+    the construct reference, not wild-type M13), (b) morphology/decode features
+    (peak width / envelope / decay) for the tail models, (c) dynamic start/stop
+    from CNN bg-class confidence instead of the 20-agreement front mask, to
+    recover front+edge coverage. Note: within the read window current decay is
+    flat (~flat to +30% tail elevation); per-window z-score already cancels
+    capillary offsets — normalization is NOT the main fix.
+- **2026-09-10 (v3 NCBI blast validation A01 — ML beats Cimarron, beats ESD identity):**
+  - A01 fastas (read-RC'd to M13-forward orientation) blasted at NCBI nt:
+    - **ESD**: 1282 bits, E=0, **786/824 (95.39%)**, gaps 32/824, Plus/Minus (M13mp18).
+    - **ML v3 (held-out CNN)**: **1229 bits, E=0, 717/741 (96.76%)**, gaps 8/741,
+      Plus/Minus (M13mp18). Cross-check via API (RID `A5W7F2ZN014`) same top hit
+      M77815.1: 717/741 (97%).
+  - Read: ML identity 96.8% > ESD 95.4%, fewer gaps (8 vs 32); alignment shorter
+    (741 vs 824) purely because the ML masks the 38-bp unresolved front (by design).
+  - **Verdict vs the bar: Cimarron 3.12 90.72% <- ML v3 ~96.8% identity at A01,
+    from raw data, no engine params, 48-well held-out model. On the right track.**
 - **2026-09-10 (v3: M13-gold per-region CNN, 48 well held-out — BEATS Cimarron 3.12):**
   - User proposal: retrain on true M13 as gold for every DLL peak, mask the
     unresolved read front ("peaks start to make sense" = first >=20 ESD==M13
