@@ -3,7 +3,7 @@
 *Supersedes `SESSION_LOG_perfect_basecaller.md` + `PROGRESS_REPORT.md` (both archived in `99_archive/`).*
 *Deep-dive companion: `03_cimarron312_dll_90.72pct/CIMARRON_MASTER.md` (DLL reverse engineering).*
 
-**Last updated:** 2026-09-10 · **Workspace:** `/media/per/78B0C7DE1FA7081C/electropherogram` (USB stick, NTFS)
+**Last updated:** 2026-09-11 · **Workspace:** `/media/per/78B0C7DE1FA7081C/electropherogram` (USB stick, NTFS)
 
 ---
 
@@ -1453,3 +1453,92 @@ right fix for "don't basecall the background".  The tile that remains is the
 tail: fixed-width windows + per-column labels degrade as current drops.
 Candidate: adaptive window width for the tail region (retrain with
 position-dependent W), then re-apply the v8 corrector.
+
+================================================================================
+## Session 2026-09-11c: GUI V15 guest detector decoded + decisive A01 isolation
+================================================================================
+
+While the user was away for the weekend, I started a headless v9 training job.  Two
+decisions preceded it: decode the *guest* Greedy detector inside Cimarron's GUI
+V15 (`sanger_toolkit/sequencing_gui_V15.py`) to see what a working detector does,
+and run decisive position-vs-label experiments on A01.
+
+**GUI V15 basecall path (traced):**
+- `_run_basecall` (sequencing_gui_V15.py:1940) -> `_process` (:2542) ->
+  `_call_bases` (:2669).  The method combo index selects the caller:
+  idx 0 = `pc_call_bases_greedy`, 1 = `pc_call_bases_with_shifts`,
+  2 = Cimarron, 3 = multiview, 4 = gated-ML.  With `basecall_method`=0 in the
+  per-band window JSONs it is PURE greedy, no CNN.
+- `_process` runs `dsp_full_pipeline` (dsp.py) with per-band knobs (baseline,
+  smooth, matrix); the candidate grid is the combined-envelope peak table
+  (`pc_normalize_display` -> `max` across channels, raw-intensity argmax
+  tiebreak) exactly the user's "summed peak-position channel" idea.
+- 12 stitched per-band A01 JSONs, pure greedy on the GUI's own DSP lanes:
+  **98.09% base identity vs the ESD** (`_full_scan_esd_compare.py`) — no ML at
+  all.  Greedy-at-GUI already hits ~the DLL's label quality.
+
+**Decisive A01 isolation (what limits us, not the CNN labels):**
+- `_cnn_at_gui_pos.py`: at the SAME GUI per-band positions, greedy labels vs our
+  v6 CNN labels (r2..r7): greedy 95.9/99.3/99.3/95.0/89.4/76.1% vs CNN
+  85.9/93.3/97.2/91.3/90.3/81.7%; overall **94.3% vs 90.6%** (n=807).  Our CNN
+  only beats greedy at the tail r6-r7.  Cause = input-domain mismatch: CNN was
+  trained on `cache_sep` separated-lane windows, GUI positions come from its own
+  per-band DSP lanes.
+- `_compare_positions_blast.py` A01 BLAST: GUI-greedy @ GUI positions =
+  811 bases, 688 matched (84.8% full, 93.4% aligned); v6 CNN @ dll_peaks =
+  1217 bases, 625 matched (51.4% full — over-detection); DLL = 841 bases,
+  790 matched (94.2% full).  So greedy-at-GUI already beats our whole de-novo
+  A01 (625-628) but is still 102 short of the DLL.
+- Position centering (A01): dll_peaks over-detects + mis-centers lead r2 & tail
+  r7 (295 & 116 candidates vs 164 & 103 esd; >6 scans off 38.0%/30.2%) while
+  the GUI grid is tight there (2.9%/8.1%); mid regions r3-r6 dll_peaks centers
+  BETTER than GUI (DLL>3 4.4/2.9/4.6/4.3% vs GUI 25.5/19.6/20.6/7.0%).
+
+**Environment bugs found & fixed:** stale `.pyc` (newer than .py) made
+`_last_positions` invisible; import-order bug pulled a DIVERGENT older copy of
+sequencing_gui_V15.py (the parent `electropherogram/` copy, ~1856-line diff)
+because ROOT was inserted before sanger_toolkit on sys.path — keep sanger_toolkit
+first and verify `GUI module file`; `blast_eval(seq)` 2nd arg is the *task*, not
+a reference (passing the ESD sequence crashed blastn); ndarray `or []` ambiguity
+-> `np.array([] if lp is None else lp)`.  USB mount transiently dropped then
+recovered.
+
+================================================================================
+## Session 2026-09-11 (weekend): v9 adaptive-width jitter CNNs — headless run
+================================================================================
+
+User approved an autonomous weekend CPU-job.  Scripts AND this log live in
+`02_denovo_cnn_ensemble_91.53pct/`.
+
+**Design (v9):** per-region half-width grows with CE physics
+W_R=(8,10,12,14,15,18,24,30) head->tail (measured peak half-width ~6 head, ~34
+tail); windows centered on ESD peak positions, jittered by d in {-3..3} with the
+window re-centered at (peak+d) so a de-novo candidate 1-3 scans off-axis still
+classifies correctly.  Same 48/48 well split as v6 (v3_training.npz).  Same
+Conv1D backbone, best-val checkpoint per region.
+
+**Split-semantics bug found & fixed before launch ⚠:** the v8 `build_corr_set.py`
+stored `split = wname not in tr` (True = TEST well) but `train_corr.py:40,46`
+uses `split` as the TRAIN mask — so the v8 CORRECTOR trained on the HELD-OUT
+wells and validated on the training wells (inverted; leakage into the reported
+710.8/628.5 v8 numbers).  Fixed in all v9 scripts: `split=True` = TRAIN well
+everywhere (`build_v9_weekend.py` appends `is_tr`, `build_corr_v9.py` appends
+`wname in tr`), and `train_v9_weekend.py` uses `trm, va = split, ~split`.
+eval_v9 drops candidates in regions whose model was skipped (empty region) rather
+than emit arbitrary bases.
+
+**Pipeline scripts:**
+- `build_v9_weekend.py` -> v9_weekend_r{r}.npz (per region X=(N,2*W_R[r]+1,4)).
+- `train_v9_weekend.py` -> base_caller_model_v9_r{r}.keras (resumable, --regions).
+- `build_corr_v9.py` -> corr_training_v9.npz (v9 probs + bandstat, split=True=train).
+- `train_corr.py --npz corr_training_v9.npz --prefix base_caller_model_v9_corr`.
+- `eval_v9_weekend.py` -> full de-novo: signal_mask_model region -> dll_peaks ->
+  adaptive-width v9 -> (optional) v9-corr -> BLAST (--corr / --prefix).
+- `weekend_v9.sh`: resumable orchestration, logs weekend_v9.log, commits locally,
+  NO push (push on Monday).  Run: nohup ./weekend_v9.sh > weekend_v9.out 2>&1 &
+
+**Launched 2026-09-11 16:09, CPU-only (6 cores, 27 GB, TF 2.21.0).**
+Stage 1 (build) done: region0..7 X = 29.5k/58.2k/116.5k/87.1k/87.5k/87.3k/58.2k/58.6k
+windows (n_tr ≈ n_va, 48/48).  Stage 2 progress:
+    r0 best val 0.7372+ (smoke) … full run: r1 best 0.8504 @ep3 (early stop @ep9),
+    r2 0.9096 @ep3 and climbing.  Checkpoints: base_caller_model_v9_r{0..2}.keras.
