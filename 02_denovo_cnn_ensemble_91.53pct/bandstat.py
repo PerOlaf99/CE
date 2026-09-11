@@ -94,9 +94,9 @@ def band_features(lanes, positions):
         spac[n - 1] = spac[n - 2]
     Y = fitted_spacing(positions, spac)
 
-    floor = max(0.05, min(0.05, float(np.mean(
+    floor = max(0.05, float(np.mean(
         [min(env[max(0, int(p) - 2)], env[min(N - 1, int(p) + 2)])
-         for p in positions]))))
+         for p in positions])))
     T = 1.24 * floor  # the fuzzy threshold scale
 
     feats = np.zeros((n, 6), np.float32)

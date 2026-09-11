@@ -1343,3 +1343,47 @@ Files written this session:
 path: use the DLL's own global spacing model + bandstat features as a separate
 post-classification filter, not as CNN input.  The CNN caps at 703-706 matched
 by design.
+
+### Sep 11 – Port 1 (OKN gate) diagnosed; V8 second-stage corrector: +6
+
+**OKN gate (FUN_10012140) diagnosis:**
+- Ran `dll_peaks` (env_floor_frac=None, region_window=False) → over-detected:
+  A01 1217 cand, A02 1212, B02 1231 (ground ~841-870).
+- `okn_q` on raw candidates: q=2 for ~all (keep/weak both emit), drop=0.
+  val=2.542 constant, qual=1.0 constant, xbnd=1.0 constant for ALL positions.
+- Cause confirmed = feature SCALE (documented Phase-C issue): `sb=0.2-5.7`
+  >> floor*1.24 ≈ 0.062, so the dynamic ramp saturates to 1 and wHigh fires
+  everywhere.  Scaling the envelope by 0.11 (mean→floor) made q spread
+  (real: q∈{1,2}, junk: q=1 mostly, val real 2.542 vs junk 1.000) — but the
+  DLL's gate still *emits* q=1 AND q=2 (weak only marks posflag), so I keep
+  candidate-set trim does NOT come from the fuzzy classifier.  Bandwidth +
+  env-abs floor are the candidate trim; fuzzy is a quality mark.
+- Gate doesn't fix precision; OKN diagnosis = gate NOT binding, labels ARE.
+
+**Key diagnostic (correct-vs-wrong at DLL positions, calibrated lanes, v6):**
+- Per-column CNN-agreement vs DLL base calls: 6-well sample 83.6% overall,
+  88.2% excluding G11 (A01 97.6%, A03 91.6%, B06 85.2%, E05 80.3%, F02 86.8%,
+  G11 60.6%).  G11 BLAST=0 (both v6/v7) — weak-signal well the DLL reads
+  fine (750 matched) but the CNN scrambles.
+- The 20%→ error columns are systematically different:
+    xbnd     correct 1.005 vs wrong 1.007  (no signal)
+    sb/T     correct 1.215 vs wrong 1.172  (weak)
+    envAll/T correct 0.787 vs wrong 0.908  (wrong HIGHER flank env)
+    width    correct 13.28 vs wrong 15.63  (wrong 17% WIDER)
+    D_Y      correct 1.008 vs wrong 0.878  (wrong LOW spacing ratio)
+    floor    correct 0.468 vs wrong 0.448
+- CNN margins barely separate (p50 0.093): the model is uniformly uncertain.
+
+**V8 second-stage per-column corrector (NEW):** input = v6 CNN 4-class probs
++ 6 bandstat features (10 floats) → per-region MLP → corrected base.
+- `build_corr_set.py` → `corr_training.npz` (83,266 rows × 10 feats, same
+  48/48 well split, 8 regions).
+- `train_corr.py`: 64-64-4, dropout, Adam 2e-3, 30 epochs, region val_acc
+  87.6/95.3/98.5/98.5/97.8/94.0/84.2/74.0 — every region better than v6 CNN.
+- `eval_v8_esdpos.py` CEILING (DLL positions):
+  **v8 MLP = 710.8 matched vs v6 CNN = 704.8 vs DLL = 754.8** (+6.0 avg/well).
+  Big wins F02 643→691 (+48), D04 678→703 (+25); small regressions B06,
+  E05, G09, H06.
+
+**Status:** best de-novo ceiling now 710.8 (was 705.7).  Still 44 below DLL.
+G11 = 0 matched for every model (single-well calibration wall).
