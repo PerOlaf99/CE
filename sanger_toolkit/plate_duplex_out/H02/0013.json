@@ -1,0 +1,21 @@
+{
+  "idx": 13,
+  "scan": 2154,
+  "ref_idx": 27,
+  "expected": "TG",
+  "called": "ATACA",
+  "ok": false,
+  "window": [
+    2159,
+    2244
+  ],
+  "pos": [
+    2168,
+    2188,
+    2207,
+    2225,
+    2240
+  ],
+  "drift": 5,
+  "el": 0.1
+}

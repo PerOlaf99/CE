@@ -1,0 +1,17 @@
+{
+  "idx": 4,
+  "scan": 2013,
+  "ref_idx": 8,
+  "expected": "AG",
+  "called": "AG",
+  "ok": true,
+  "window": [
+    2008,
+    2017
+  ],
+  "pos": [
+    2008,
+    2016
+  ],
+  "el": 0.6
+}

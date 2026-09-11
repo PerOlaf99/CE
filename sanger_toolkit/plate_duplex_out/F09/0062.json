@@ -1,0 +1,19 @@
+{
+  "idx": 62,
+  "scan": 2568,
+  "ref_idx": 84,
+  "expected": "TA",
+  "called": "GCT",
+  "ok": false,
+  "window": [
+    2573,
+    2598
+  ],
+  "pos": [
+    2574,
+    2583,
+    2591
+  ],
+  "drift": 5,
+  "el": 0.1
+}

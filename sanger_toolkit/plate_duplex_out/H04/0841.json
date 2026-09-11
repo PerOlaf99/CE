@@ -1,0 +1,21 @@
+{
+  "idx": 841,
+  "scan": 8982,
+  "ref_idx": 862,
+  "expected": "TC",
+  "called": "GGTAG",
+  "ok": false,
+  "window": [
+    8987,
+    9088
+  ],
+  "pos": [
+    9005,
+    9042,
+    9050,
+    9061,
+    9078
+  ],
+  "drift": 5,
+  "el": 0.1
+}

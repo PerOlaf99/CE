@@ -1,0 +1,21 @@
+{
+  "idx": 816,
+  "scan": 8943,
+  "ref_idx": 861,
+  "expected": "AT",
+  "called": "GGAGA",
+  "ok": false,
+  "window": [
+    8948,
+    9021
+  ],
+  "pos": [
+    8957,
+    8969,
+    8994,
+    9007,
+    9020
+  ],
+  "drift": 5,
+  "el": 0.1
+}

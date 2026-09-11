@@ -1,0 +1,20 @@
+{
+  "idx": 0,
+  "scan": 2031,
+  "ref_idx": 2,
+  "expected": "AC",
+  "called": "CAGC",
+  "ok": false,
+  "window": [
+    2032,
+    2082
+  ],
+  "pos": [
+    2032,
+    2045,
+    2062,
+    2080
+  ],
+  "drift": 1,
+  "el": 0.6
+}

@@ -23,9 +23,10 @@ import os, sys, json, argparse
 from collections import defaultdict
 import numpy as np
 
-ROOT = '/home/tv/electropherogram'
+_HERE = os.path.dirname(os.path.realpath(__file__))
+ROOT = os.path.dirname(_HERE) if os.path.basename(_HERE) == '02_denovo_cnn_ensemble_91.53pct' else _HERE
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, '02_denovo_cnn_ensemble_91.53pct'))
+sys.path.insert(0, _HERE)
 
 from extract_training_data import parse_rsd, parse_esd
 

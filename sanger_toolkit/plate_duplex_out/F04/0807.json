@@ -1,0 +1,21 @@
+{
+  "idx": 807,
+  "scan": 8938,
+  "ref_idx": 852,
+  "expected": "CT",
+  "called": "ACGGG",
+  "ok": false,
+  "window": [
+    8942,
+    9002
+  ],
+  "pos": [
+    8953,
+    8961,
+    8986,
+    8989,
+    8992
+  ],
+  "drift": 4,
+  "el": 0.1
+}

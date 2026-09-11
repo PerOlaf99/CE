@@ -1,0 +1,20 @@
+{
+  "idx": 1,
+  "scan": 2092,
+  "ref_idx": 1,
+  "expected": "GA",
+  "called": "CACA",
+  "ok": false,
+  "window": [
+    2097,
+    2235
+  ],
+  "pos": [
+    2097,
+    2110,
+    2220,
+    2234
+  ],
+  "drift": 5,
+  "el": 1.0
+}

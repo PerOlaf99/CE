@@ -1,0 +1,40 @@
+well=A01  test_positions=200  raw=9647  esd=841  ref=827  MAX_DRIFT=5.0 HARD_DRIFT=8.0
+  20/200 done (1789048340s)
+  40/200 done (1789048446s)
+  60/200 done (1789048556s)
+  80/200 done (1789048653s)
+  100/200 done (1789048751s)
+  120/200 done (1789048855s)
+  140/200 done (1789048951s)
+  160/200 done (1789049042s)
+  180/200 done (1789049136s)
+  200/200 done (1789049211s)
+
+WROTE /media/per/78B0C7DE1FA7081C/electropherogram/sanger_toolkit/duplex_window_grid.json  (200 positions)
+
+OVERALL: 27.5%  (55/200)  TRUSTWORTHY(|drift|<=MAX_DRIFT): 27.5%  (55/200)
+
+  ws_bin    n   acc%  drift   t/s
+    0-9     36  50.0%   3.2  5.0
+   10-19   130  27.7%   3.9  5.1
+   20-29    26   3.8%   4.8  5.1
+   50-59     1   0.0%   5.0  0.4
+   60-69     1   0.0%   5.0  0.4
+   80-89     2   0.0%   5.0  0.4
+  100-109    1   0.0%   5.0  0.5
+  110-119    1   0.0%   5.0  0.4
+  130-139    2   0.0%   5.0  0.5
+
+ drift    n   acc%    ws
+   0+    26  38.5%   12
+   1+    16  12.5%   11
+   2+    10  20.0%   13
+   3+     7  71.4%   12
+   4+     6  50.0%   11
+   5+   135  24.4%   20
+
+  head: 28.6%  avg_ws=12  n=14
+
+   mid: 28.0%  avg_ws=17  n=175
+
+  tail: 18.2%  avg_ws=26  n=11

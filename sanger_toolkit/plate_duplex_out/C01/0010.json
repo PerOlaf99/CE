@@ -1,0 +1,20 @@
+{
+  "idx": 10,
+  "scan": 2287,
+  "ref_idx": 27,
+  "expected": "TG",
+  "called": "ATAC",
+  "ok": false,
+  "window": [
+    2292,
+    2347
+  ],
+  "pos": [
+    2294,
+    2309,
+    2326,
+    2342
+  ],
+  "drift": 5,
+  "el": 0.1
+}

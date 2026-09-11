@@ -1,0 +1,19 @@
+{
+  "idx": 0,
+  "scan": 2105,
+  "ref_idx": 14,
+  "expected": "AA",
+  "called": "GTC",
+  "ok": false,
+  "window": [
+    2106,
+    2156
+  ],
+  "pos": [
+    2122,
+    2135,
+    2150
+  ],
+  "drift": 1,
+  "el": 1.0
+}

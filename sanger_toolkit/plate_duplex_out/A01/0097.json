@@ -1,0 +1,20 @@
+{
+  "idx": 97,
+  "scan": 2809,
+  "ref_idx": 113,
+  "expected": "GC",
+  "called": "GTCA",
+  "ok": false,
+  "window": [
+    2804,
+    2844
+  ],
+  "pos": [
+    2804,
+    2817,
+    2826,
+    2835
+  ],
+  "drift": -5,
+  "el": 0.1
+}

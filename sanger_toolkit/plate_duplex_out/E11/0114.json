@@ -1,0 +1,19 @@
+{
+  "idx": 114,
+  "scan": 2923,
+  "ref_idx": 133,
+  "expected": "TA",
+  "called": "AAC",
+  "ok": false,
+  "window": [
+    2918,
+    2975
+  ],
+  "pos": [
+    2923,
+    2948,
+    2967
+  ],
+  "drift": -5,
+  "el": 0.1
+}

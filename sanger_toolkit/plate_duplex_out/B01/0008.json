@@ -1,0 +1,22 @@
+{
+  "idx": 8,
+  "scan": 2256,
+  "ref_idx": 23,
+  "expected": "TG",
+  "called": "CTGCAG",
+  "ok": false,
+  "window": [
+    2261,
+    2288
+  ],
+  "pos": [
+    2261,
+    2266,
+    2272,
+    2278,
+    2282,
+    2287
+  ],
+  "drift": 5,
+  "el": 0.1
+}

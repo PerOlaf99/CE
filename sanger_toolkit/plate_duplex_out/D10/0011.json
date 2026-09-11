@@ -1,0 +1,20 @@
+{
+  "idx": 11,
+  "scan": 2179,
+  "ref_idx": 28,
+  "expected": "GC",
+  "called": "AGTA",
+  "ok": false,
+  "window": [
+    2184,
+    2230
+  ],
+  "pos": [
+    2184,
+    2194,
+    2203,
+    2221
+  ],
+  "drift": 5,
+  "el": 0.1
+}

@@ -1,0 +1,21 @@
+{
+  "idx": 796,
+  "scan": 8747,
+  "ref_idx": 814,
+  "expected": "AC",
+  "called": "GGTAT",
+  "ok": false,
+  "window": [
+    8752,
+    8842
+  ],
+  "pos": [
+    8760,
+    8777,
+    8790,
+    8815,
+    8841
+  ],
+  "drift": 5,
+  "el": 0.1
+}

@@ -1,0 +1,21 @@
+{
+  "idx": 765,
+  "scan": 8628,
+  "ref_idx": 804,
+  "expected": "CA",
+  "called": "GCCTA",
+  "ok": false,
+  "window": [
+    8633,
+    8681
+  ],
+  "pos": [
+    8633,
+    8640,
+    8648,
+    8658,
+    8678
+  ],
+  "drift": 5,
+  "el": 0.1
+}

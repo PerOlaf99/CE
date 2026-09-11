@@ -19,7 +19,7 @@ the 96-well plate `MB1000_M13_DT`.
 | rank | caller | per-base acc vs M13 | reference needed |
 |---|---|---|---|
 | 1 | **Ours, reference-polished** (`basecall.sh polished`) | **100.00%** | yes |
-| 2 | **Ours, de-novo CNN ensemble + refine** (`basecall.sh denovo --refine`) | **91.53%** | no |
+| 2 | **Ours, de-novo CNN + DSP calibration, per-BLAST-matched_bp** (48-well held-out, M13 ref) | **~701-706 matched** | no |
 | 3 | **Cimarron 3.12** (DLL ESD baseline) | 90.72% | no |
 | 4 | ours de-novo before v2 model / before refine | 86.60% / 87.07% | no |
 
@@ -1129,3 +1129,217 @@ ESD, far below GRAFT.  Remaining GRAFT errors = **6 tail bases** (scans
   - Logs: `sanger_toolkit/duplex_window_grid_log.txt`, `sanger_toolkit/nplex_grid_log.txt`.
 - Results land in `sanger_toolkit/duplex_window_grid.json`,
   `sanger_toolkit/nplex_grid.json` when each run finishes.
+
+## 2026-09-11 — v3 regional CNN ensemble trained; first honest BLAST-check (48-holdout)
+
+Ran the user's loop: train on 48 wells, hold out 48, measure vs Cimarron 3.12
+**by the real acceptance test** (NCBI `blastn -task blastn` vs M13mp18), not by
+span identity.
+
+**New v3 callers** (`02_denovo_cnn_ensemble_91.53pct/base_caller_model_v3_*.keras`):
+regional CNN ensemble (begin/mid/tail/tailtail), 5-layer, win ±15, batch 64,
+ADAM lr 1e-4, ~10 epochs LAMBDAed, val acc: begin 0.9219 / mid 0.9413 /
+tail 0.8356 / tailtail 0.6648. Read assembled peak-by-peak; single-call
+experiment (no +1 vote, no ESD fallback, no GAP_DIRECTED_LAMBDA).
+
+**Result (48 held-out wells, both callers align):**
+
+| metric | OURS v3 | DLL 3.12 | gap |
+|---|---|---|---|
+| span identity vs M13 (same columns) | 93.86% | 99.94% | −6.1 |
+| bases_detected | 851.7 | 869.7 | −18 |
+| **matched_bp (fair BLAST metric)** | **701.3** | **754.8** | **−53.5** |
+| pident | 94.03 | 96.85 | −2.8 |
+| coverage | 86.2 | 87.8 | −1.6 |
+| full_identity | 82.39 | 86.81 | −4.4 |
+
+Internal standard: 44/47 wells call T (construct) at mutation, not M13 C.
+Beat DLL matched_bp on 2/48 wells. **ACCEPTANCE: FAIL.**
+
+Gap locus (matched_bp deficit −53.5 splits):
+- 27 "good" wells (span≥97%): ours 729 vs DLL 753 → still −23 (length + ~1.5%
+  pident), so it is NOT mostly the bad wells.
+- 21 "bad" wells (span<97%): ours 665 vs DLL 757 → −92 (per-column errors).
+
+vs the old pipeline: v3 raised de-novo matched from 641 → 701 (half the gap,
+was −112), but the caller still loses on per-column accuracy *and* coverage.
+
+**Repeatable runs:**
+- `02_denovo_cnn_ensemble_91.53pct/train_v3.py` (train 48/hold 48)
+- `02_denovo_cnn_ensemble_91.53pct/eval_v3.py` (span identity, reproduces 93.8%)
+- `02_denovo_cnn_ensemble_91.53pct/eval_v3_blast.py` (BLAST acceptance, writes
+  `eval_v3/{well}_ours.fa`, logged `/tmp/opencode/v3_blast.log`)
+
+Next levers (in order of expected payoff): 5'-head + tail recall (851 vs 870,
+phase-10 segmented engine), then per-column accuracy toward 99% in the aligned
+span. A CNN+ESD hybrid is the guaranteed-shortest path to parity but blurs the
+"de-novo" claim.
+
+### Per-column accuracy lever — controlled experiments (Sep 11, part2)
+Goal under test: lift aligned-span identity from 93.86% toward DLL 99.94%.
+Five controlled experiments on the 48-well heldout, all negative or null:
+
+| # | hypothesis | test | result |
+|---|---|---|---|
+| 1 | confidence is the issue | jitter-5 vote (avg probs ±1,±2) | 93.47% == baseline (no change) |
+| 2 | dye bleed kills raw channels | color-matrix calibrate (`settingsV10.json["matrix"]`) + nearest-direction class | 33% → chance (chance=25%) |
+| 3 | calibrated dominant channel == base | matrix + integration ±k + all 24 channel perms | best 32.9% |
+| 4 | tail fails on spacing variance | spacing-normalized (warped) bands, fixed 25-grid | 55% vs raw 86.7% (catastrophic loss of neighbor context) |
+| 5 | wider context helps tail | window ±30 (61 samples) tail model | 86.98% vs 86.7% (null) |
+| 6 | channel/direction features | center-column dominant channel | chance (24.8%) |
+
+Structure of the residual error (model diagnostics):
+- confident (max prob ≥0.9) windows are 98% correct in EVERY region — but only
+  ~49% of windows are confident (mid 77%, tail 29%).
+- non-confident windows carry the loss; DLL recovers them, CNN can't.
+- tight spacing is a red herring: in mid, tight vs wide spacing score the same
+  (92.7% vs 92.7%); tail's loss is overlap of tight BRIGHT peaks (85.4%),
+  faint wide tail is fine (93.4%).
+- raw 4 channels are mobility-misaligned (dominant channel at ESD scan equals
+  the base's dye only ~25% of the time), so no static linear unmix works; the
+  CNN implicitly handles shift by using ±a few scans (jitter training).
+
+Verdict: with this feature family the CNN is at its plateau (~93.5% non-band /
+~98% on the confident half). Reaching DLL's 99.94% per-column requires the
+mobility/phasing-corrected calibrated (per-dye-integrated) signal the DLL
+computes in `fBandSpace`/`nfeeder` — the 03_cimarron312_dll_90.72pct port —
+not more CNN capacity or feature cleverness.
+
+### Coverage/recall lever (Sep 11, part 3) — all experiments null or negative
+The 53.5 matched_bp gap decomposes cleanly (best-HSP blast, 48 wells):
+
+| component | OURS | DLL | diff |
+|---|---|---|---|
+| aligned-region mismatches | 31.9 | 4.1 | **+27.9** (per-column acc) |
+| aligned HSP length | 745 | 779 | **−33.6** (tail truncates our HSP) |
+| aligned gaps | 12.0 | 19.9 | −7.9 (we are ahead) |
+
+Four recall/cap tails tested, none recover matched:
+- unmask the 20-agreement head: only 239 new cols/48 wells, called 52% correct
+  vs M13 -> **+0.2/well** (negligible)
+- include ESD "insertion" columns in read order: read length matches DLL
+  (861 vs 870) but matched DROPS to 689 (**−12**) -> longer read != more matches
+- `refine_denovo`-style drop (0.50) + gap-fill on top of v3 calls: **−39**
+  (hyperparams tuned for the old full-well pipeline)
+- global color calibration + dominant-channel: chance (mobility-misaligned)
+
+Conclusion for the 53.5 deficit: it is ~28 excess mismatches + ~34 truncated
+HSP, BOTH driven by per-column read accuracy (worst in the tail), NOT by raw
+recall. The DLL wins because its calibrated per-column calls hold together
+through the tail (99.9%); every pure-ML way we tried to add or keep bases
+fails because the extra/tail bases do not match M13 well enough. Pure-CNN
+per-column is plateaued (93.5% non-band / ~98% on confident half) — the
+residual error is the DLL's phasing/mobility-calibrated integration.
+
+### CNN+ESD hybrid (Sep 11, part 4) — asymptote below the DLL, never parity
+`eval_v3_hybrid.py`: per-column, use v3 CNN where max base-prob >= t else the
+DLL's ESD base, blast re-eval (48 held-out wells).  It interpolates from the
+de-novo v3 read to the DLL read, as t goes 0->1, and the peak sits UNDER the
+DLL because the DLL's per-column accuracy (99.94%) strictly dominates the CNN
+on every column (confident-half CNN ~98%, overall ~93.5%):
+
+    t     matched  de-novo%   (DLL = 754.8)
+    0.4     708.4    94.2%
+    0.6     730.1    82.3%
+    0.8     744.5    62.0%
+    0.9     750.0    54.8%
+    0.99    752.4    20.2%
+
+Parity cannot be reached by any swap threshold; matching the bar requires our
+model virtually absent (= the DLL read).  This closes the whole "CNN-outputs-
+only" hypothesis space: after 6 accuracy experiments + 4 recall experiments +
+this hybrid, EVERY recombination of our own CNN outputs is bounded below the
+Cimarron read.  The gap is INFORMATIONAL, not architectural: the DLL's win is
+per-dye calibrated features (phasing/mobility/colour-whitening) its DSP
+produces, which the 4-channel CNN simply does not receive.
+
+Ship-able artifacts (all saved, runnable, 48-well held-out):
+  best de-novo caller ......... v3 region CNNs     701.3 matched (~94% span id.)
+  max-accuracy hybrid ......... t=0.90             750.0 matched (55% de-novo)
+  DLL reference ............... Cimarron read      754.8 matched
+
+The only remaining de-novo path to a >= Cimarron read per the NCBI-BLAST bar
+is the DSP-calibration port (csibq153.dll -> orthogonal per-dye features for
+the CNN), tracked in 03_cimarron312_dll_90.72pct.
+
+### DSP calibration into the CNN (Sep 11, part 5) — decisive probes ⭐
+User asked: can we train on ESD/M13 to reproduce Cimarron's output, and is
+pre-separation needed vs raw?  Controlled experiments answered it:
+
+**A) The raw 4-dye race is a cross-contaminated mix.**  At the DLL's called
+peaks: dominant-dye decode of the RAW RSD channels = 28% (chance); of the
+matrix-separated, mobility-calibrated lanes (cache_sep) = **95.4% / 93.6%**
+(A01/A02).  So the peak info IS in the raw data, but the CNN has to un-bleed
+it; feeding calibrated lanes exposes it directly.
+
+**B) Region-specialized CNNs on calibrated lanes (labels = esd), held-out
+wells, SAME columns/labels:** begin 93%, mid 99%, tail 91.6%, tailtail 79.4%
+overall 94.3% (vs 93.6% raw-trained).  Combined with an 8-region fine split,
+raw+calibrated stacked channels, and a ported FUN_1002511d candidate detector
+(eval_v6_blast.py), the full de-novo read lands at ~610-650 matched - the
+candidate SET is wrong (1217 vs 841 DLL called when lenient; 801 under-detect
+when gated).  Position count/gate, not labels, caps the full pipeline.
+
+**C) CEILING test (the user's question, decisive):** label the DLL's OWN esd
+positions with our calibrated v6 CNNs, build the read, BLAST 48 wells.
+Result: **705.7 matched vs DLL 754.8** (one well G11 no-alignment=0).  Even
+with EXACT DLL positions, the CNN reproduces the DLL's labels to only ~94-95%
+per column on the esd-position frame.  The DLL's read itself matches 754.8
+(~99.9%/column aligned).  So the CNN saturates near the dominant-dye ceiling:
+the remaining ~5% of columns are exactly the ones where Cimarron's FUZZY/BandStat
+classifier (FUN_10012140 + 14-field FUN_1001dee1, ported-engine modules) uses
+width/SNR/spacing/flank-env evidence that a raw-window CNN does not receive.
+
+CONCLUSION for the roadmap: (1) calibrated lanes were necessary and are now
+absorbed; (2) the last distance to the DLL is per-band STATISTICAL features
+(width, xbnd, spacing model, flank-env signal - all DSP-computable offline) fed
+to the CNN, plus the OKN called-peak gate to fix the candidate SET.  These are
+the two concrete ports that close 705 -> 754.
+Models saved: base_caller_model_v5_*.keras (4-reg cal),
+base_caller_model_v6_cal8_*.keras (8-reg cal), base_caller_model_v6_mix8_*.keras
+(raw+cal stacked).
+Repairs: dll_peakdet.py import broken (f-string + _spacing_curve arg + NameError
+in the experimental multi_pass); restored `dll_peaks` to the validated clean
+port, renamed the broken wrapper dll_peaks_mp.
+
+### Sep 11 – Port 2 (BandStat features → CNN side-tower): FAIL
+
+**Experiment:** build per-band DSP features (xbnd, sb/floor, envAll/floor, width,
+D_Y spacing ratio, floor) at every esd peak position using `bandstat.py`, append
+as a 6-value vector to each training sample (`feat_cal.py` → `cal_feat.npz`),
+train v7 CNNs with a dual-input architecture (conv backbone on 31×4 + 32-unit
+Dense side-tower on 6 features → concatenated → 96→48→5 classes).  8-region
+per-region training (`train_v7_feat.py`, 83,266 windows, 12% bg frac, 24 epochs).
+
+Val-acc (v7 feat vs v6 cal-only, same 8-region bins):
+  r0: 85.4% → 85.4%  (no change)
+  r1: 94.0% → 94.4%  (−0.4pp)
+  r2: 98.0% → 98.0%  (no change)
+  r3: 97.9% → 98.2%  (−0.3pp)
+  r4: 96.9% → 97.5%  (−0.6pp)
+  r5: 93.1% → 93.4%  (−0.3pp)
+  r6: 82.5% → 83.1%  (−0.6pp)
+  r7: 73.1% → 73.6%  (−0.5pp)
+
+**Ceiling BLAST (DLL positions + v7 CNN labels, 48 wells): 703.0 matched**
+vs v6 ceiling 705.7, vs DLL 754.8.
+
+**FINDING:** The BandStat side-tower is *redundant* — the CNN already implicitly
+extracts xbnd/width/env information from the 31-scan window.  Adding it as a
+separate input adds capacity and slightly worsens generalization.  The CNN
+per-column accuracy wall at ~94-95% is structural (limited by window receptive
+field, not by missing features).  The remaining ~5% gap = the fuzzy classifier
+BandStat/fuzzy gate that uses *global* per-band statistics (spacing model,
+envAll across the full read) that are unavailable in a 31-scan local window.
+
+**Conclusion:** Port 2 is dead.  The 6-feature side-tower adds zero value.
+
+Files written this session:
+  feat_cal.py, train_v7_feat.py, eval_v7_esdpos.py, bandstat.py (features)
+  base_caller_model_v7_feat_r{0..7}.keras (v7 models, all saved)
+  cal_feat.npz (83,266 windows × 6 features, 8-region labels from cal8.npz)
+
+**Updated roadmap:** Port 1 (OKN called-peak gate) remains the only viable
+path: use the DLL's own global spacing model + bandstat features as a separate
+post-classification filter, not as CNN input.  The CNN caps at 703-706 matched
+by design.

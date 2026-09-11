@@ -1,0 +1,21 @@
+{
+  "idx": 129,
+  "scan": 3055,
+  "ref_idx": 146,
+  "expected": "CA",
+  "called": "AAAGT",
+  "ok": false,
+  "window": [
+    3060,
+    3104
+  ],
+  "pos": [
+    3067,
+    3074,
+    3082,
+    3091,
+    3097
+  ],
+  "drift": 5,
+  "el": 0.1
+}

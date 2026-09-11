@@ -1,0 +1,21 @@
+{
+  "idx": 858,
+  "scan": 9284,
+  "ref_idx": 891,
+  "expected": "TA",
+  "called": "CCAGT",
+  "ok": false,
+  "window": [
+    9289,
+    9335
+  ],
+  "pos": [
+    9289,
+    9298,
+    9314,
+    9325,
+    9334
+  ],
+  "drift": 5,
+  "el": 0.1
+}

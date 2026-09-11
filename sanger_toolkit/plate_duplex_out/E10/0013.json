@@ -1,0 +1,21 @@
+{
+  "idx": 13,
+  "scan": 2124,
+  "ref_idx": 27,
+  "expected": "TG",
+  "called": "CTACA",
+  "ok": false,
+  "window": [
+    2129,
+    2214
+  ],
+  "pos": [
+    2132,
+    2157,
+    2175,
+    2194,
+    2208
+  ],
+  "drift": 5,
+  "el": 0.1
+}

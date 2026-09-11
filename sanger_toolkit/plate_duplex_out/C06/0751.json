@@ -1,0 +1,20 @@
+{
+  "idx": 751,
+  "scan": 8565,
+  "ref_idx": 769,
+  "expected": "TA",
+  "called": "CCAC",
+  "ok": false,
+  "window": [
+    8570,
+    8614
+  ],
+  "pos": [
+    8572,
+    8586,
+    8596,
+    8613
+  ],
+  "drift": 5,
+  "el": 0.1
+}

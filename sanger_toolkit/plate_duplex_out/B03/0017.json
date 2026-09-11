@@ -1,0 +1,20 @@
+{
+  "idx": 17,
+  "scan": 2236,
+  "ref_idx": 34,
+  "expected": "CG",
+  "called": "ATAG",
+  "ok": false,
+  "window": [
+    2240,
+    2303
+  ],
+  "pos": [
+    2240,
+    2265,
+    2288,
+    2302
+  ],
+  "drift": 4,
+  "el": 0.1
+}

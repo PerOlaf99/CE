@@ -1,0 +1,20 @@
+{
+  "idx": 65,
+  "scan": 2613,
+  "ref_idx": 87,
+  "expected": "CT",
+  "called": "CGTC",
+  "ok": false,
+  "window": [
+    2608,
+    2656
+  ],
+  "pos": [
+    2608,
+    2619,
+    2630,
+    2652
+  ],
+  "drift": -5,
+  "el": 0.1
+}

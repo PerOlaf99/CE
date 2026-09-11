@@ -1,0 +1,20 @@
+{
+  "idx": 831,
+  "scan": 9027,
+  "ref_idx": 887,
+  "expected": "CG",
+  "called": "ATAT",
+  "ok": false,
+  "window": [
+    9022,
+    9069
+  ],
+  "pos": [
+    9027,
+    9035,
+    9053,
+    9061
+  ],
+  "drift": -5,
+  "el": 0.1
+}

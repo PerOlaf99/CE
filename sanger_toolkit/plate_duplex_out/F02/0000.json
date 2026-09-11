@@ -1,0 +1,20 @@
+{
+  "idx": 0,
+  "scan": 2225,
+  "ref_idx": 23,
+  "expected": "TG",
+  "called": "CGAT",
+  "ok": false,
+  "window": [
+    2226,
+    2276
+  ],
+  "pos": [
+    2232,
+    2243,
+    2255,
+    2270
+  ],
+  "drift": 1,
+  "el": 1.0
+}

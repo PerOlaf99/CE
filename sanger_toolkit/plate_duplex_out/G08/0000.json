@@ -1,0 +1,19 @@
+{
+  "idx": 0,
+  "scan": 2022,
+  "ref_idx": 8,
+  "expected": "AG",
+  "called": "AAA",
+  "ok": false,
+  "window": [
+    2023,
+    2073
+  ],
+  "pos": [
+    2034,
+    2046,
+    2071
+  ],
+  "drift": 1,
+  "el": 0.5
+}

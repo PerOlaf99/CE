@@ -1,0 +1,17 @@
+{
+  "idx": 146,
+  "scan": 3128,
+  "ref_idx": 164,
+  "expected": "GG",
+  "called": "GG",
+  "ok": true,
+  "window": [
+    3123,
+    3146
+  ],
+  "pos": [
+    3128,
+    3138
+  ],
+  "el": 0.9
+}

@@ -1,0 +1,21 @@
+{
+  "idx": 13,
+  "scan": 2218,
+  "ref_idx": 32,
+  "expected": "GT",
+  "called": "ACAAA",
+  "ok": false,
+  "window": [
+    2223,
+    2308
+  ],
+  "pos": [
+    2235,
+    2252,
+    2267,
+    2282,
+    2302
+  ],
+  "drift": 5,
+  "el": 0.1
+}

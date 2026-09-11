@@ -1,0 +1,17 @@
+{
+  "idx": 803,
+  "scan": 8976,
+  "ref_idx": 844,
+  "expected": "GT",
+  "called": "GT",
+  "ok": true,
+  "window": [
+    8973,
+    8992
+  ],
+  "pos": [
+    8976,
+    8983
+  ],
+  "el": 0.6
+}

@@ -1,0 +1,19 @@
+{
+  "idx": 0,
+  "scan": 2016,
+  "ref_idx": 2,
+  "expected": "AC",
+  "called": "AAC",
+  "ok": false,
+  "window": [
+    2021,
+    2037
+  ],
+  "pos": [
+    2021,
+    2029,
+    2036
+  ],
+  "drift": 5,
+  "el": 1.2
+}

@@ -1,0 +1,18 @@
+{
+  "idx": 114,
+  "scan": 2948,
+  "ref_idx": 130,
+  "expected": "AC",
+  "called": "AT",
+  "ok": false,
+  "window": [
+    2953,
+    2964
+  ],
+  "pos": [
+    2955,
+    2963
+  ],
+  "drift": 5,
+  "el": 0.6
+}

@@ -1,0 +1,19 @@
+{
+  "idx": 10,
+  "scan": 2187,
+  "ref_idx": 26,
+  "expected": "CT",
+  "called": "ATA",
+  "ok": false,
+  "window": [
+    2192,
+    2247
+  ],
+  "pos": [
+    2201,
+    2220,
+    2238
+  ],
+  "drift": 5,
+  "el": 0.1
+}

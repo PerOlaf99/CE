@@ -1,0 +1,20 @@
+{
+  "idx": 789,
+  "scan": 8712,
+  "ref_idx": 807,
+  "expected": "GG",
+  "called": "CAAG",
+  "ok": false,
+  "window": [
+    8711,
+    8765
+  ],
+  "pos": [
+    8722,
+    8736,
+    8748,
+    8760
+  ],
+  "drift": -1,
+  "el": 0.1
+}

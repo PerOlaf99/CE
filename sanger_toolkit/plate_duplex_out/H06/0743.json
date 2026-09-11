@@ -1,0 +1,21 @@
+{
+  "idx": 743,
+  "scan": 8515,
+  "ref_idx": 764,
+  "expected": "GC",
+  "called": "CGTAC",
+  "ok": false,
+  "window": [
+    8515,
+    8547
+  ],
+  "pos": [
+    8518,
+    8525,
+    8531,
+    8539,
+    8546
+  ],
+  "drift": 0,
+  "el": 0.1
+}

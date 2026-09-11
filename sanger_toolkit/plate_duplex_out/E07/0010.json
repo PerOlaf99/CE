@@ -1,0 +1,20 @@
+{
+  "idx": 10,
+  "scan": 2182,
+  "ref_idx": 21,
+  "expected": "CA",
+  "called": "CGAT",
+  "ok": false,
+  "window": [
+    2187,
+    2242
+  ],
+  "pos": [
+    2195,
+    2208,
+    2221,
+    2240
+  ],
+  "drift": 5,
+  "el": 0.1
+}

@@ -1,0 +1,20 @@
+{
+  "idx": 797,
+  "scan": 8832,
+  "ref_idx": 828,
+  "expected": "GA",
+  "called": "CCGG",
+  "ok": false,
+  "window": [
+    8827,
+    8937
+  ],
+  "pos": [
+    8831,
+    8864,
+    8893,
+    8934
+  ],
+  "drift": -5,
+  "el": 0.1
+}

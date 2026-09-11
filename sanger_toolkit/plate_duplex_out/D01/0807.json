@@ -1,0 +1,20 @@
+{
+  "idx": 807,
+  "scan": 9061,
+  "ref_idx": 832,
+  "expected": "AG",
+  "called": "TTAA",
+  "ok": false,
+  "window": [
+    9065,
+    9125
+  ],
+  "pos": [
+    9076,
+    9079,
+    9084,
+    9087
+  ],
+  "drift": 4,
+  "el": 0.1
+}

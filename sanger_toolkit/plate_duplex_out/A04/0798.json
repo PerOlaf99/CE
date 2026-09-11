@@ -1,0 +1,20 @@
+{
+  "idx": 798,
+  "scan": 9003,
+  "ref_idx": 850,
+  "expected": "TC",
+  "called": "CCCA",
+  "ok": false,
+  "window": [
+    8998,
+    9031
+  ],
+  "pos": [
+    8998,
+    9005,
+    9011,
+    9028
+  ],
+  "drift": -5,
+  "el": 0.1
+}

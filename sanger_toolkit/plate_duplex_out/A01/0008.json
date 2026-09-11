@@ -1,0 +1,22 @@
+{
+  "idx": 8,
+  "scan": 2127,
+  "ref_idx": 18,
+  "expected": "TT",
+  "called": "CATGCC",
+  "ok": false,
+  "window": [
+    2132,
+    2159
+  ],
+  "pos": [
+    2133,
+    2138,
+    2144,
+    2150,
+    2154,
+    2158
+  ],
+  "drift": 5,
+  "el": 0.1
+}

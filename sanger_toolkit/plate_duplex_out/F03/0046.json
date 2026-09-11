@@ -1,0 +1,21 @@
+{
+  "idx": 46,
+  "scan": 2432,
+  "ref_idx": 60,
+  "expected": "AG",
+  "called": "CATTC",
+  "ok": false,
+  "window": [
+    2437,
+    2546
+  ],
+  "pos": [
+    2440,
+    2469,
+    2487,
+    2536,
+    2543
+  ],
+  "drift": 5,
+  "el": 0.1
+}

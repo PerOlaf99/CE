@@ -1,0 +1,18 @@
+{
+  "idx": 6,
+  "scan": 1970,
+  "ref_idx": 11,
+  "expected": "GC",
+  "called": "CC",
+  "ok": false,
+  "window": [
+    1965,
+    1981
+  ],
+  "pos": [
+    1968,
+    1978
+  ],
+  "drift": -5,
+  "el": 0.9
+}

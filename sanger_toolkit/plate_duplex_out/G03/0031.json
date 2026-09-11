@@ -1,0 +1,19 @@
+{
+  "idx": 31,
+  "scan": 2409,
+  "ref_idx": 54,
+  "expected": "GT",
+  "called": "ACA",
+  "ok": false,
+  "window": [
+    2412,
+    2455
+  ],
+  "pos": [
+    2421,
+    2430,
+    2447
+  ],
+  "drift": 3,
+  "el": 0.1
+}

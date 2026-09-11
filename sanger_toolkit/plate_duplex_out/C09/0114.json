@@ -1,0 +1,20 @@
+{
+  "idx": 114,
+  "scan": 2954,
+  "ref_idx": 132,
+  "expected": "AT",
+  "called": "TAAC",
+  "ok": false,
+  "window": [
+    2949,
+    3006
+  ],
+  "pos": [
+    2953,
+    2963,
+    2987,
+    3005
+  ],
+  "drift": -5,
+  "el": 0.1
+}

@@ -1,0 +1,21 @@
+{
+  "idx": 77,
+  "scan": 2618,
+  "ref_idx": 92,
+  "expected": "TC",
+  "called": "CGTTG",
+  "ok": false,
+  "window": [
+    2623,
+    2679
+  ],
+  "pos": [
+    2623,
+    2637,
+    2648,
+    2664,
+    2673
+  ],
+  "drift": 5,
+  "el": 0.1
+}

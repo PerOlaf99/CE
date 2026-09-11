@@ -1,0 +1,22 @@
+{
+  "idx": 8,
+  "scan": 2111,
+  "ref_idx": 22,
+  "expected": "AT",
+  "called": "GCCCTG",
+  "ok": false,
+  "window": [
+    2116,
+    2143
+  ],
+  "pos": [
+    2117,
+    2122,
+    2126,
+    2130,
+    2134,
+    2140
+  ],
+  "drift": 5,
+  "el": 0.1
+}

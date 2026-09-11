@@ -1,0 +1,18 @@
+{
+  "idx": 4,
+  "scan": 1993,
+  "ref_idx": 11,
+  "expected": "GC",
+  "called": "CA",
+  "ok": false,
+  "window": [
+    1988,
+    2001
+  ],
+  "pos": [
+    1992,
+    2000
+  ],
+  "drift": -5,
+  "el": 0.7
+}

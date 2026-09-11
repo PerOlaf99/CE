@@ -1,0 +1,18 @@
+{
+  "idx": 2,
+  "scan": 2021,
+  "ref_idx": 11,
+  "expected": "GC",
+  "called": "CC",
+  "ok": false,
+  "window": [
+    2016,
+    2030
+  ],
+  "pos": [
+    2016,
+    2027
+  ],
+  "drift": -5,
+  "el": 0.6
+}

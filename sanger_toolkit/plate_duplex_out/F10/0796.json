@@ -1,0 +1,21 @@
+{
+  "idx": 796,
+  "scan": 9003,
+  "ref_idx": 823,
+  "expected": "GC",
+  "called": "AACTA",
+  "ok": false,
+  "window": [
+    9008,
+    9098
+  ],
+  "pos": [
+    9015,
+    9036,
+    9049,
+    9063,
+    9075
+  ],
+  "drift": 5,
+  "el": 0.1
+}

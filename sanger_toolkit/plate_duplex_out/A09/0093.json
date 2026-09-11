@@ -1,0 +1,20 @@
+{
+  "idx": 93,
+  "scan": 2693,
+  "ref_idx": 106,
+  "expected": "GT",
+  "called": "TTCC",
+  "ok": false,
+  "window": [
+    2698,
+    2752
+  ],
+  "pos": [
+    2699,
+    2714,
+    2731,
+    2750
+  ],
+  "drift": 5,
+  "el": 0.1
+}

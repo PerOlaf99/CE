@@ -1,0 +1,20 @@
+{
+  "idx": 31,
+  "scan": 2387,
+  "ref_idx": 54,
+  "expected": "GT",
+  "called": "TACA",
+  "ok": false,
+  "window": [
+    2390,
+    2433
+  ],
+  "pos": [
+    2390,
+    2398,
+    2407,
+    2424
+  ],
+  "drift": 3,
+  "el": 0.1
+}

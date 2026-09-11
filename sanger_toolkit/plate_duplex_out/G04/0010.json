@@ -1,0 +1,20 @@
+{
+  "idx": 10,
+  "scan": 2233,
+  "ref_idx": 30,
+  "expected": "AG",
+  "called": "TATT",
+  "ok": false,
+  "window": [
+    2238,
+    2293
+  ],
+  "pos": [
+    2243,
+    2260,
+    2272,
+    2285
+  ],
+  "drift": 5,
+  "el": 0.1
+}

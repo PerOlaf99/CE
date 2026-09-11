@@ -1,0 +1,20 @@
+{
+  "idx": 885,
+  "scan": 9449,
+  "ref_idx": 891,
+  "expected": "TA",
+  "called": "CTTG",
+  "ok": false,
+  "window": [
+    9454,
+    9613
+  ],
+  "pos": [
+    9505,
+    9526,
+    9537,
+    9548
+  ],
+  "drift": 5,
+  "el": 0.1
+}

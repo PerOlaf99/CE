@@ -1,0 +1,21 @@
+{
+  "idx": 721,
+  "scan": 8503,
+  "ref_idx": 747,
+  "expected": "AG",
+  "called": "TACGA",
+  "ok": false,
+  "window": [
+    8508,
+    8575
+  ],
+  "pos": [
+    8508,
+    8521,
+    8535,
+    8548,
+    8563
+  ],
+  "drift": 5,
+  "el": 0.1
+}

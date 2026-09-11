@@ -1,0 +1,18 @@
+{
+  "idx": 109,
+  "scan": 3002,
+  "ref_idx": 136,
+  "expected": "GA",
+  "called": "GA",
+  "ok": true,
+  "window": [
+    2997,
+    3006
+  ],
+  "pos": [
+    2997,
+    3004
+  ],
+  "drift": -5,
+  "el": 1.1
+}

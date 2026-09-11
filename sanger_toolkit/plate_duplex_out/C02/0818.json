@@ -1,0 +1,21 @@
+{
+  "idx": 818,
+  "scan": 9269,
+  "ref_idx": 861,
+  "expected": "AT",
+  "called": "CGAGG",
+  "ok": false,
+  "window": [
+    9274,
+    9360
+  ],
+  "pos": [
+    9274,
+    9303,
+    9323,
+    9345,
+    9357
+  ],
+  "drift": 5,
+  "el": 0.1
+}

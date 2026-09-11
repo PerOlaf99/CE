@@ -1,0 +1,21 @@
+{
+  "idx": 0,
+  "scan": 2084,
+  "ref_idx": 2,
+  "expected": "AC",
+  "called": "ACAGA",
+  "ok": false,
+  "window": [
+    2085,
+    2135
+  ],
+  "pos": [
+    2085,
+    2096,
+    2107,
+    2118,
+    2129
+  ],
+  "drift": 1,
+  "el": 0.2
+}

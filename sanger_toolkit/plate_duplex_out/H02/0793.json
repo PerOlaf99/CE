@@ -1,0 +1,21 @@
+{
+  "idx": 793,
+  "scan": 8893,
+  "ref_idx": 836,
+  "expected": "CG",
+  "called": "TAGCC",
+  "ok": false,
+  "window": [
+    8898,
+    8982
+  ],
+  "pos": [
+    8901,
+    8911,
+    8927,
+    8951,
+    8960
+  ],
+  "drift": 5,
+  "el": 0.1
+}

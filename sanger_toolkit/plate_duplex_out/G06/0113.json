@@ -1,0 +1,20 @@
+{
+  "idx": 113,
+  "scan": 3003,
+  "ref_idx": 141,
+  "expected": "GG",
+  "called": "ACTA",
+  "ok": false,
+  "window": [
+    3008,
+    3078
+  ],
+  "pos": [
+    3014,
+    3038,
+    3050,
+    3060
+  ],
+  "drift": 5,
+  "el": 0.5
+}

@@ -1,0 +1,20 @@
+{
+  "idx": 721,
+  "scan": 8514,
+  "ref_idx": 746,
+  "expected": "AA",
+  "called": "TCGA",
+  "ok": false,
+  "window": [
+    8519,
+    8586
+  ],
+  "pos": [
+    8530,
+    8545,
+    8558,
+    8575
+  ],
+  "drift": 5,
+  "el": 0.1
+}

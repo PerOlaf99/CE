@@ -1,0 +1,22 @@
+{
+  "idx": 3,
+  "scan": 2131,
+  "ref_idx": 14,
+  "expected": "AA",
+  "called": "TTCGAT",
+  "ok": false,
+  "window": [
+    2136,
+    2229
+  ],
+  "pos": [
+    2137,
+    2160,
+    2175,
+    2188,
+    2201,
+    2220
+  ],
+  "drift": 5,
+  "el": 0.1
+}

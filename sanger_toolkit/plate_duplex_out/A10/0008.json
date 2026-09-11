@@ -1,0 +1,22 @@
+{
+  "idx": 8,
+  "scan": 2228,
+  "ref_idx": 29,
+  "expected": "CA",
+  "called": "GGTCCG",
+  "ok": false,
+  "window": [
+    2233,
+    2260
+  ],
+  "pos": [
+    2233,
+    2238,
+    2244,
+    2249,
+    2253,
+    2257
+  ],
+  "drift": 5,
+  "el": 0.1
+}

@@ -1,0 +1,20 @@
+{
+  "idx": 25,
+  "scan": 2319,
+  "ref_idx": 38,
+  "expected": "TC",
+  "called": "TAGT",
+  "ok": false,
+  "window": [
+    2319,
+    2373
+  ],
+  "pos": [
+    2324,
+    2345,
+    2358,
+    2372
+  ],
+  "drift": 0,
+  "el": 0.1
+}

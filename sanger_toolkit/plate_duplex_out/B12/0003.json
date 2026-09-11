@@ -1,0 +1,22 @@
+{
+  "idx": 3,
+  "scan": 2198,
+  "ref_idx": 15,
+  "expected": "AG",
+  "called": "TCGTAC",
+  "ok": false,
+  "window": [
+    2203,
+    2296
+  ],
+  "pos": [
+    2208,
+    2221,
+    2232,
+    2259,
+    2276,
+    2293
+  ],
+  "drift": 5,
+  "el": 1.0
+}

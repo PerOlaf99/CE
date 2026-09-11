@@ -1,0 +1,19 @@
+{
+  "idx": 31,
+  "scan": 2454,
+  "ref_idx": 59,
+  "expected": "GA",
+  "called": "CCA",
+  "ok": false,
+  "window": [
+    2457,
+    2500
+  ],
+  "pos": [
+    2469,
+    2482,
+    2497
+  ],
+  "drift": 3,
+  "el": 0.1
+}

@@ -1,0 +1,21 @@
+{
+  "idx": 817,
+  "scan": 8878,
+  "ref_idx": 845,
+  "expected": "TG",
+  "called": "CAGGG",
+  "ok": false,
+  "window": [
+    8883,
+    9015
+  ],
+  "pos": [
+    8891,
+    8927,
+    8961,
+    8998,
+    9009
+  ],
+  "drift": 5,
+  "el": 0.1
+}

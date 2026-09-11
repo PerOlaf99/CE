@@ -418,7 +418,7 @@ def dll_multi_pass(
 
     # Record pass-0 metrics
     positions0 = scans.copy()
-    sp0_curve, _ = _spacing_curve(scans, min_scan=min_scan)
+    sp0_curve, _ = _spacing_curve(scans, scans, min_scan=min_scan)
     ema0 = _ema_spacing(sp0_curve, alpha) if len(sp0_curve) else np.array([])
 
     metrics = {
@@ -481,7 +481,7 @@ def dll_multi_pass(
             scans, envs = scans[keep], envs[keep]
 
         # ---- Derive target spacing for this pass ----
-        sp_curve, _ = _spacing_curve(scans, min_scan=min_scan)
+        sp_curve, _ = _spacing_curve(scans, scans, min_scan=min_scan)
         if tgt is not None:
             tgt_pass = tgt  # user-supplied, use as-is
         else:
@@ -526,7 +526,7 @@ def dll_multi_pass(
     # To stay compatible, we'll just return the dict as extra info printed.
     if verbose:
         print(f"  multi-pass final: n={len(positions)} spans={sp0_curve_mean if 'sp0_curve_mean' in metrics else '?'} "
-              f"ema={metrics.get('pass1_ema_mean', '?':.3f)} tgt={tgt_pass:.2f}")
+              f"ema={metrics.get('pass1_ema_mean', 0.0):.3f} tgt={tgt_pass:.2f}")
 
     return positions, seq, intensities, metrics
 
@@ -578,7 +578,7 @@ def _peak_width(lane: np.ndarray, p: int, thresh: float) -> int:
 # ---------------------------------------------------------------------------
 # Compatibility shim: keep the original dll_peaks() signature working
 # ---------------------------------------------------------------------------
-def dll_peaks(
+def dll_peaks_mp(
     separated: np.ndarray,
     shifts: Optional[Sequence[int]] = None,
     region: Optional[Tuple[int, int]] = None,
