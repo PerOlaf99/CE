@@ -1,0 +1,1 @@
+Grid results: duplex_window_grid.json overall acc 27.5% (55/200, trustworthy 100%); window 0-9=50%,10-19=27.7%,20-29=3.8%; N-plex best by N: N2=46%,N3=22%,N5=3%,N7=2%,N10=1%; bench plate 96 wells ESD 94.48 -> GRAFT 94.99 (+0.51pp), graft>esd 96/96.
