@@ -1387,3 +1387,69 @@ by design.
 
 **Status:** best de-novo ceiling now 710.8 (was 705.7).  Still 44 below DLL.
 G11 = 0 matched for every model (single-well calibration wall).
+
+================================================================================
+## Session 2025-09-11b: ML true-signal region + CE current physics validation
+================================================================================
+
+**User's thesis:** the esd<->cache_sep frame offset is NOT a constant mobility
+shift. CE runs at constant VOLTAGE; U=R*I -> I falls as capillary/polymer
+resistance R rises through the run, so migration slows progressively.  Longer
+fragments are slower + broader (peak width ~ 5x at tail), strand-copy-number
+distribution is uneven, and diffusion/polymer-path further broadens the tail.
+Implication: (1) check current profile to explain the per-well/block offset,
+(2) train an ML ON THE RAW DATA to find the true-signal [start, stop] and
+never basecall the background (primer front / dye blob / dead tail).
+
+**Current / CE physics — CONFIRMED on the calibrated lanes (all 96 wells):**
+- Current profile per well is distinct and falls through the run (66 -> ~46-54
+  uA), matching U=R*I at constant voltage.  Failing wells run lower average
+  current (G11 med 52.0, H08 54.2, A09 50.0) vs healthy (A01 56.9, A03 59.4).
+- Peak half-width grows monotonically: head ~6 scans, mid ~8.7, tail ~34-36
+  scans (5-6x) — slow long-fragment migration + diffusion + fewer fluorophores.
+  Tail envelope also lower (1.5 -> 0.9).
+- Signal START correlates with current (r=+0.567): higher-current wells start
+  later (faster early migration).  Span vs current r=-0.267.
+
+**True-signal region (esd peak spans):** start 1909-2246 (mean 2088), stop
+9139-9534 (mean 9370), span 7019-7544.  Frame = 9647 scans, uniform.
+
+**ML signal-region model (NEW, v-mask):
+- `build_signal_set.py`: per-well features (128 bins over 9647 scans) =
+  raw envelope max, current mean/std/derivative, cross-channel brightness
+  (N,128,5).  Label = first/last esd peak +- 1.5x local spacing.
+- `train_signal_mask.py`: per-BIN TRUE-SIGNAL mask classifier (12,288 bin
+  samples instead of 96 wells); CNN Conv1D encode->upsample, binary xent.
+  Test: start err mean 83 scans (within 150: 71%), stop err mean 57 scans
+  (within 150: 92%).  `signal_mask_model.keras`.
+- Works from raw .rsd signal + Current channel ONLY (no calibrated lanes,
+  no esd).  Generalizes to held-out wells.
+
+**Full-de-novo benefit (48 wells, never basecalls background):**
+- detector restricted to ML region (envelope >=0 anyway, region window off),
+  v6 CNN labels:
+    baseline (no region, env-floor 0.02)      = 603.6
+    + ML true-signal region                    = 624.5   (+~21)
+    + v8 corrector (v6 probs + bandstats)      = 628.5
+    + oracle per-well shift (sweep -5..+3)     = 643.1
+- DLL-pos + v8 ceiling remains 710.8; gap = per-peak position fidelity, not
+  a constant shift (|esd-candidate| median 1-3 scans, resid-vs-current r is
+  small and sign-varying per well).
+
+**Per-region agreement at candidate positions (v6, 10 wells):**
+    r1 (0.35)      70.2%   conf 0.93
+    r2             82.6%   conf 0.99
+    r3             81.3%   conf 0.99
+    r4             78.2%   conf 0.98
+    r5             73.3%   conf 0.92
+    r6             67.3%   conf 0.77
+    r7 (tail 0.95+)64.0%   conf 0.71
+  Tail agreement degrades 82%->64% exactly where current decays and peaks
+  broaden — the CNN was trained with a fixed W=15 window that cannot cover
+  tail peaks 34 scans wide.
+
+**Conclusion:** the ML signal-region is a clean +20 matched win and is the
+right fix for "don't basecall the background".  The tile that remains is the
+tail: fixed-width windows + per-column labels degrade as current drops.
+Candidate: adaptive window width for the tail region (retrain with
+position-dependent W), then re-apply the v8 corrector.
