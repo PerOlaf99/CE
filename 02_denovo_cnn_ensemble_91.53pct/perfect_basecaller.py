@@ -89,7 +89,141 @@ def _build_window(ch_raw, peak_scans, w):
     return ((X - mu) / sd).astype(np.float32)
 
 
-def cnn_probs(models, ch_raw, peak_scans):
+def _raw_profiles(ch_raw, cur_arr=None, lo=1500, hi=9450):
+    """FWHM and peak-cadence profiles measured from raw channels (no ESD).
+    Returns (fw_prof, sp_prof), both length len(ch_raw), float arrays."""
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+    from scipy.signal import find_peaks
+    ch_raw = np.asarray(ch_raw, dtype=np.float64)
+    if ch_raw.ndim == 2 and ch_raw.shape[0] == 4 and ch_raw.shape[1] != 4:
+        ch_raw = ch_raw.T
+    n = len(ch_raw)
+    base = minimum_filter1d(ch_raw, size=401, mode='nearest')
+    c = np.clip(ch_raw - base, 0, None)
+    comb = uniform_filter1d(c.max(axis=1), size=2)
+    pk, _ = find_peaks(comb, distance=3, prominence=comb.max() * 0.03)
+    pk = pk[(pk >= lo) & (pk <= hi)]
+    n = len(ch_raw)
+    if len(pk) < 2:
+        fw_prof = np.full(n, 10.0)
+        sp_prof = np.full(n, 7.0)
+        return fw_prof, sp_prof
+    scans = pk.astype(float)
+    spacing = np.diff(scans, append=scans[-1])
+    sp_prof = uniform_filter1d(
+        np.interp(np.arange(n), scans, spacing, left=spacing[0], right=spacing[-1]),
+        size=81, mode='nearest')
+    fw_raw = np.full(len(pk), np.nan)
+    for i, sc in enumerate(pk):
+        sl = pk[max(0, i - 1)]; sr = pk[min(len(pk) - 1, i + 1)]
+        dom = int(np.argmax(c[sc]))
+        lo2, hi2 = max(0, (sl + sc) // 2), min(n - 1, (sc + sr) // 2)
+        if hi2 - lo2 < 2:
+            continue
+        seg = c[lo2:hi2 + 1, dom]; pkm = c[sc, dom]
+        if pkm <= 0:
+            continue
+        ab = np.where(seg >= pkm / 2)[0]
+        if len(ab) == 0:
+            continue
+        fw_raw[i] = ab.max() - ab.min() + 1
+    fw_med = float(np.nanmedian(fw_raw)) if np.isfinite(fw_raw).any() else 10.0
+    fw_prof = np.interp(np.arange(n), scans,
+                        np.where(np.isfinite(fw_raw), fw_raw, fw_med),
+                        left=fw_med, right=fw_med)
+    fw_prof = uniform_filter1d(fw_prof, size=21, mode='nearest')
+    return fw_prof, sp_prof
+
+
+def _velocity_features(ch_raw, cur_arr, peak_scans):
+    """Raw-measured (fwhm_norm, spacing_norm, scan_frac, current_norm) at each
+    peak scan. Order matches extract_v5rawnorm aux columns. Returns (N,4)."""
+    from scipy.ndimage import uniform_filter1d
+    n = len(ch_raw)
+    fw_prof, sp_prof = _raw_profiles(ch_raw, cur_arr)
+    k = np.arange(len(peak_scans), dtype=float)
+    sfrac = (k / max(1, len(peak_scans) - 1)) if len(peak_scans) > 1 else np.zeros(len(peak_scans))
+    sp_arr = np.array([float(sp_prof[min(max(int(s), 0), n - 1)]) for s in peak_scans])
+    fw_arr = np.array([float(fw_prof[min(max(int(s), 0), n - 1)]) for s in peak_scans])
+    sp_s = np.median(sp_arr) if len(sp_arr) else 1.0
+    fw_s = np.median(fw_arr) if len(fw_arr) else 1.0
+    cu_arr = np.array([float(cur_arr[min(max(int(s), 0), n - 1)]) if cur_arr is not None else 60.0
+                       for s in peak_scans])
+    aux = np.stack([
+        np.clip(fw_arr / fw_s, 0.5, 4.0),
+        np.clip(sp_arr / sp_s, 0.5, 4.0),
+        sfrac,
+        np.clip(cu_arr / 60.0, 0.5, 1.5),
+    ], axis=1)
+    return aux.astype(np.float32)
+
+
+_GAIN_BLOCK  = 512
+_GAIN_PCT    = 99.0
+_MIN_HALF    = 8
+_MAX_HALF    = 48
+_WIN         = 31
+
+
+def _gain_norm_rows(ch_raw, peak_scans, fw_prof):
+    """Per-channel p99-envelope gain-normalization then adaptive-window + z-score.
+    Exactly replicates extract_v5rawnorm.gain_normalize + adaptive_window."""
+    from scipy.ndimage import uniform_filter1d
+    ch_raw = np.asarray(ch_raw, dtype=np.float64)
+    if ch_raw.ndim == 2 and ch_raw.shape[0] == 4 and ch_raw.shape[1] != 4:
+        ch_raw = ch_raw.T
+    n, nch = ch_raw.shape
+    # --- gain_normalize: divide each channel by its p99 envelope ----------
+    nb = max(4, n // _GAIN_BLOCK)
+    edges = np.linspace(0, n, nb + 1).astype(int)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    env_pts = np.stack([np.percentile(ch_raw[edges[i]:edges[i + 1]],
+                                      _GAIN_PCT, axis=0)
+                        for i in range(nb)], axis=0)
+    sp = nb // 4 * 2 + 1
+    env_sm = uniform_filter1d(env_pts, size=sp, axis=0, mode='nearest')
+    env = np.empty_like(ch_raw)
+    scans_all = np.arange(n, dtype=float)
+    for c in range(nch):
+        env[:, c] = np.interp(scans_all, centers, env_sm[:, c],
+                              left=env_sm[0, c], right=env_sm[-1, c])
+    ch_norm = ch_raw / np.maximum(env, 1e-6)
+    # --- adaptive_window per peak -----------------------------------------
+    X = np.empty((len(peak_scans), _WIN, nch), dtype=np.float32)
+    for k, s in enumerate(peak_scans):
+        s = int(np.clip(s, 0, n - 1))
+        fw = float(np.clip(fw_prof[s], 2.0, 40.0))
+        half = int(round(1.5 * fw))
+        half = max(_MIN_HALF, min(_MAX_HALF, half))
+        lo, hi = s - half, s + half + 1
+        sl = int(np.clip(lo, 0, n - 1))
+        sh = int(np.clip(hi, lo + 1, n))
+        seg = ch_norm[sl:sh].copy()
+        if lo < 0:
+            seg = np.pad(seg, ((-lo, 0), (0, 0)), mode='edge')
+        if hi > n:
+            seg = np.pad(seg, ((0, hi - n), (0, 0)), mode='edge')
+        if len(seg) < 2:
+            seg = np.pad(seg, ((0, 2 - len(seg)), (0, 0)), mode='edge')
+        grid = np.linspace(0, len(seg) - 1, _WIN)
+        out = np.empty((_WIN, nch), dtype=np.float32)
+        for c in range(nch):
+            out[:, c] = np.interp(grid, np.arange(len(seg)), seg[:, c])
+        mu = out.mean(); sd = out.std() + 1e-8
+        X[k] = (out - mu) / sd
+    return X.astype(np.float32)
+
+
+def _zscore_rows(X):
+    """Second per-window z-score. extract_v5raw/rawnorm's adaptive_window
+    already z-scores each window before saving to the book; the trainers
+    (train_v5raw.py) apply zscore() AGAIN, so the model expects BOTH."""
+    mu = X.mean(axis=1, keepdims=True)
+    sd = X.std(axis=1, keepdims=True) + 1e-8
+    return ((X - mu) / sd).astype(np.float32)
+
+
+def cnn_probs(models, ch_raw, peak_scans, cur_arr=None, gain_norm=False):
     n_models = len(models)
     if n_models == 0:
         return np.zeros((len(peak_scans), 4), dtype=np.float64)
@@ -98,14 +232,26 @@ def cnn_probs(models, ch_raw, peak_scans):
     s_min, s_max = scans_arr.min(), scans_arr.max()
     s_range = max(1.0, s_max - s_min)
     pos_frac = ((scans_arr - s_min) / s_range).astype(np.float32)
+    aux_state = None
     cache = {}
+    fw_prof = None
+    if gain_norm:
+        fw_prof, _ = _raw_profiles(ch_raw)
     for m in models:
-        inp_len = m.input_shape[1] if hasattr(m, 'input_shape') and m.input_shape[1] else 2 * WINDOW + 1
+        inp_shape0 = m.inputs[0].shape if hasattr(m, 'inputs') and m.inputs else None
+        inp_len = (int(inp_shape0[1])
+                   if inp_shape0 and len(inp_shape0) > 1 and inp_shape0[1]
+                   else 2 * WINDOW + 1)
         w = (inp_len - 1) // 2
-        inp_ch = m.input_shape[-1] if hasattr(m, 'input_shape') else 4
-        key = (w, inp_ch)
+        inp_ch = (int(inp_shape0[-1])
+                  if inp_shape0 and inp_shape0[-1] else 4)
+        wants_aux = len(m.inputs) >= 2
+        key = (w, inp_ch, wants_aux)
         if key not in cache:
-            X4 = _build_window(ch_raw, peak_scans, w)
+            if gain_norm:
+                X4 = _zscore_rows(_gain_norm_rows(ch_raw, peak_scans, fw_prof))
+            else:
+                X4 = _build_window(ch_raw, peak_scans, w)
             if inp_ch == 5:
                 X5 = np.concatenate([X4, pos_frac[:, np.newaxis, np.newaxis] * np.ones(
                     (len(X4), 2 * w + 1, 1), dtype=np.float32)], axis=2)
@@ -113,7 +259,12 @@ def cnn_probs(models, ch_raw, peak_scans):
             else:
                 cache[key] = (X4, X4)
         X4, Xinp = cache[key]
-        p = m.predict(Xinp, verbose=0)
+        if wants_aux:
+            if aux_state is None:
+                aux_state = _velocity_features(ch_raw, cur_arr, peak_scans).astype(np.float32)
+            p = m.predict([Xinp, aux_state], verbose=0)
+        else:
+            p = m.predict(Xinp, verbose=0)
         if p.shape[1] == 5:
             p = p[:, :4]
         probs += p
@@ -127,8 +278,14 @@ def phred(p):
 
 
 def call_raw(rsd_path, models=None, refine=False, refine_v2=False,
-             hybrid=None, esd_path=None, gapcheck=False, **engine_kw):
+             hybrid=None, esd_path=None, gapcheck=False, gain_norm=False,
+             **engine_kw):
     ch, scans = cim.read_rsd(rsd_path)
+    cur_arr = None
+    try:
+        _, _, cur_arr = cim.read_rsd(rsd_path, with_current=True)
+    except Exception:
+        pass
     eng = build_engine(**engine_kw)
     res = eng.call(ch, scans)
     esd_bases, conf, ps = [], [], []
@@ -154,7 +311,7 @@ def call_raw(rsd_path, models=None, refine=False, refine_v2=False,
         gc_seq = assign_bases_with_channels(gc_peaks, chw)
         # Score with CNN if available
         if models:
-            probs = cnn_probs(models, chw, gc_peaks)
+            probs = cnn_probs(models, chw, gc_peaks, cur_arr, gain_norm)
             pred = probs.argmax(1)
             gc_seq = ''.join(LABELS[i] for i in pred)
             conf = np.array([phred(probs[k, pred[k]])
@@ -174,7 +331,7 @@ def call_raw(rsd_path, models=None, refine=False, refine_v2=False,
             chw = np.asarray(ch, dtype=np.float64)
             if chw.ndim == 2 and chw.shape[0] == 4 and chw.shape[0] <= chw.shape[1]:
                 chw = chw.T
-            probs = cnn_probs(models, chw, esd_dll_pos)
+            probs = cnn_probs(models, chw, esd_dll_pos, cur_arr, gain_norm)
             pmax = probs.max(1)
             pred = probs.argmax(1)
             seq = []
@@ -193,7 +350,7 @@ def call_raw(rsd_path, models=None, refine=False, refine_v2=False,
         chw = np.asarray(ch, dtype=np.float64)
         if chw.ndim == 2 and chw.shape[0] == 4 and chw.shape[0] <= chw.shape[1]:
             chw = chw.T
-        probs = cnn_probs(models, chw, ps)
+        probs = cnn_probs(models, chw, ps, cur_arr, gain_norm)
         if hybrid is not None:
             pmax = probs.max(1)
             pred = probs.argmax(1)
@@ -211,16 +368,21 @@ def call_raw(rsd_path, models=None, refine=False, refine_v2=False,
                         dtype=np.int32)
         if refine_v2:
             seq, conf, _ = refine_denovo_v2(models, chw, list(seq), list(conf),
-                                             np.asarray(ps))
+                                             np.asarray(ps),
+                                             cur_arr=cur_arr,
+                                             gain_norm=gain_norm)
         elif refine:
             seq, conf, _ = refine_denovo(models, chw, list(seq), list(conf),
-                                         np.asarray(ps))
+                                         np.asarray(ps),
+                                         cur_arr=cur_arr,
+                                         gain_norm=gain_norm)
     return dict(seq=seq, conf=conf, scans=np.array(ps), esd_len=len(res.sequence))
 
 
 def refine_denovo(models, ch_raw, seq, conf, scans,
-                  drop_p=0.50, add_p=0.68, gap_frac=1.25, iters=3, jitter=2):
-    probs = cnn_probs(models, ch_raw, scans)
+                  drop_p=0.50, add_p=0.68, gap_frac=1.25, iters=3, jitter=2,
+                  cur_arr=None, gain_norm=False):
+    probs = cnn_probs(models, ch_raw, scans, cur_arr, gain_norm)
     pmax = probs.max(1)
     pred = probs.argmax(1)
     keep = pmax >= drop_p
@@ -242,7 +404,7 @@ def refine_denovo(models, ch_raw, seq, conf, scans,
         added = 0
         if cands:
             uniq = sorted(set(cands))
-            cp = cnn_probs(models, ch_raw, uniq)
+            cp = cnn_probs(models, ch_raw, uniq, cur_arr, gain_norm)
             cm = {s: (cp[k].max(), cp[k].argmax()) for k, s in enumerate(uniq)}
             for a, b in zip(sc_arr[:-1], sc_arr[1:]):
                 gap = b - a
@@ -296,13 +458,14 @@ def stutter_merge(seq, scans, conf, gap_frac=0.55, p_t=0.60):
 def refine_denovo_v2(models, ch_raw, seq, conf, scans,
                      drop_p_hi=0.55, drop_p_lo=0.40, add_p=0.55,
                      gap_frac=1.15, iters=4, jitter=3,
-                     stutter_gap=0.50, stutter_p=0.55):
+                     stutter_gap=0.50, stutter_p=0.55,
+                     cur_arr=None, gain_norm=False):
     """Position-adaptive refine with stutter merge and two-pass cleanup.
 
     drop_p_hi/lo: linearly interpolated across read length.
       Q1 (start): drop_p_hi, Q4 (tail): drop_p_lo.
     """
-    probs = cnn_probs(models, ch_raw, scans)
+    probs = cnn_probs(models, ch_raw, scans, cur_arr, gain_norm)
     pmax = probs.max(1)
     pred = probs.argmax(1)
     n = len(scans)
@@ -335,7 +498,7 @@ def refine_denovo_v2(models, ch_raw, seq, conf, scans,
         added = 0
         if cands:
             uniq = sorted(set(cands))
-            cp = cnn_probs(models, ch_raw, uniq)
+            cp = cnn_probs(models, ch_raw, uniq, cur_arr, gain_norm)
             cm = {s: (cp[k].max(), cp[k].argmax()) for k, s in enumerate(uniq)}
             for a, b in zip(sc_arr[:-1], sc_arr[1:]):
                 gap = b - a
@@ -436,6 +599,9 @@ def main():
                     help='path to Cimarron ESD file (for hybrid with DLL peaks)')
     ap.add_argument('--gapcheck', action='store_true',
                     help='use GapCheck fuzzy-logic peak refinement (no ESD needed)')
+    ap.add_argument('--gain-norm', action='store_true',
+                    help='gain-normalize trace noise floors by dye channel '
+                         '(for v5raw/v5rawnorm 2-input models)')
     ap.add_argument('--mismatch-phred', type=int, default=25)
     ap.add_argument('--indel-phred', type=int, default=20)
     ap.add_argument('--out')
@@ -448,7 +614,8 @@ def main():
 
     if args.rsd:
         r = call_raw(args.rsd, models, refine=args.refine, refine_v2=args.refine_v2,
-                     hybrid=args.hybrid, gapcheck=args.gapcheck, esd_path=args.esd)
+                     hybrid=args.hybrid, gapcheck=args.gapcheck,
+                     esd_path=args.esd, gain_norm=args.gain_norm)
         pol, nfix = polish(r['seq'], r['conf'], ref,
                            args.mismatch_phred, args.indel_phred) if ref else (r['seq'], 0)
         print(f'{os.path.basename(args.rsd)}: raw={len(r["seq"])}b '
@@ -475,7 +642,8 @@ def main():
         r = call_raw(os.path.join(args.plate, w + '.rsd'), models,
                      refine=args.refine, refine_v2=args.refine_v2,
                      hybrid=args.hybrid, gapcheck=args.gapcheck,
-                     esd_path=os.path.join(args.gt, w + '.esd'))
+                     esd_path=os.path.join(args.gt, w + '.esd'),
+                     gain_norm=args.gain_norm)
         raw_acc = perbase_vs_ref(r['seq'], ref) if ref else float('nan')
         if ref:
             pol, _ = polish(r['seq'], r['conf'], ref,
