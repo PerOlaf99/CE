@@ -1,0 +1,248 @@
+{
+  "source": "NCBI BLASTn (MEGABLAST, database=nt) via URL API",
+  "n_wells": 12,
+  "wells": [
+    "A01",
+    "A03",
+    "A05",
+    "A07",
+    "A09",
+    "A11",
+    "B01",
+    "B03",
+    "B05",
+    "B07",
+    "B09",
+    "C01"
+  ],
+  "ours": {
+    "mean_identity_pct": 96.25994630025363,
+    "mean_aln_len": 760.3333333333334,
+    "mean_call_len": 831.5,
+    "total_gaps": 226
+  },
+  "cimarron312_esd": {
+    "mean_identity_pct": 96.35075907312317,
+    "mean_aln_len": 782.8333333333334,
+    "mean_call_len": 872.5833333333334,
+    "total_gaps": 270
+  },
+  "per_well": {
+    "A01": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 761,
+        "aln_len": 793,
+        "pct": 96,
+        "gaps": 20
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 786,
+        "aln_len": 824,
+        "pct": 95,
+        "gaps": 32
+      },
+      "ours_len": 868,
+      "esd_len": 841
+    },
+    "A03": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 702,
+        "aln_len": 733,
+        "pct": 96,
+        "gaps": 20
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 729,
+        "aln_len": 755,
+        "pct": 97,
+        "gaps": 19
+      },
+      "ours_len": 810,
+      "esd_len": 859
+    },
+    "A05": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 733,
+        "aln_len": 765,
+        "pct": 96,
+        "gaps": 25
+      },
+      "esd": {
+        "hit": "L08819.1 M13mp10 phage cloning vector",
+        "ident": 749,
+        "aln_len": 775,
+        "pct": 97,
+        "gaps": 19
+      },
+      "ours_len": 814,
+      "esd_len": 888
+    },
+    "A07": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 732,
+        "aln_len": 764,
+        "pct": 96,
+        "gaps": 23
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 741,
+        "aln_len": 768,
+        "pct": 96,
+        "gaps": 23
+      },
+      "ours_len": 801,
+      "esd_len": 862
+    },
+    "A09": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 709,
+        "aln_len": 725,
+        "pct": 98,
+        "gaps": 13
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 786,
+        "aln_len": 818,
+        "pct": 96,
+        "gaps": 24
+      },
+      "ours_len": 834,
+      "esd_len": 882
+    },
+    "A11": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 747,
+        "aln_len": 774,
+        "pct": 97,
+        "gaps": 16
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 739,
+        "aln_len": 761,
+        "pct": 97,
+        "gaps": 17
+      },
+      "ours_len": 830,
+      "esd_len": 870
+    },
+    "B01": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 739,
+        "aln_len": 776,
+        "pct": 95,
+        "gaps": 21
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 778,
+        "aln_len": 807,
+        "pct": 96,
+        "gaps": 19
+      },
+      "ours_len": 895,
+      "esd_len": 876
+    },
+    "B03": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 755,
+        "aln_len": 787,
+        "pct": 96,
+        "gaps": 24
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 768,
+        "aln_len": 802,
+        "pct": 96,
+        "gaps": 30
+      },
+      "ours_len": 833,
+      "esd_len": 866
+    },
+    "B05": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 721,
+        "aln_len": 736,
+        "pct": 98,
+        "gaps": 10
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 743,
+        "aln_len": 762,
+        "pct": 98,
+        "gaps": 17
+      },
+      "ours_len": 798,
+      "esd_len": 864
+    },
+    "B07": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 750,
+        "aln_len": 788,
+        "pct": 95,
+        "gaps": 20
+      },
+      "esd": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 765,
+        "aln_len": 813,
+        "pct": 94,
+        "gaps": 36
+      },
+      "ours_len": 837,
+      "esd_len": 912
+    },
+    "B09": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 709,
+        "aln_len": 729,
+        "pct": 97,
+        "gaps": 16
+      },
+      "esd": {
+        "hit": "L08819.1 M13mp10 phage cloning vector",
+        "ident": 734,
+        "aln_len": 756,
+        "pct": 97,
+        "gaps": 17
+      },
+      "ours_len": 794,
+      "esd_len": 887
+    },
+    "C01": {
+      "ours": {
+        "hit": "M77815.1 M13mp18 phage cloning vector",
+        "ident": 723,
+        "aln_len": 754,
+        "pct": 96,
+        "gaps": 18
+      },
+      "esd": {
+        "hit": "L08819.1 M13mp10 phage cloning vector",
+        "ident": 731,
+        "aln_len": 753,
+        "pct": 97,
+        "gaps": 17
+      },
+      "ours_len": 864,
+      "esd_len": 864
+    }
+  }
+}
