@@ -1,0 +1,20 @@
+{
+  "metric": "NCBI BLAST+ megablast vs M77815.1 (M13mp18)",
+  "ours": {
+    "identical_bases": 73462,
+    "aligned_length": 77136,
+    "mean_pident": 95.30469791666667,
+    "mean_read_len": 920.9166666666666,
+    "total_gaps": 2226
+  },
+  "cimarron312_esd": {
+    "identical_bases": 72286,
+    "aligned_length": 74726,
+    "mean_pident": 96.76288541666666,
+    "mean_read_len": 872.96875,
+    "total_gaps": 1967
+  },
+  "delta_identical_bases": 1176,
+  "delta_aligned_length": 2410,
+  "delta_mean_pident": -1.458187499999994
+}
