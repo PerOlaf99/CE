@@ -75,9 +75,9 @@ def main():
         regs = np.array([region_of(f_) for f_ in fr])
         nP = len(pp)
         Xw = {r: [] for r in range(8)}
-        for i, p in enumerate(pp):
+        for i, ps in enumerate(pp):
             Xw[int(regs[i])].append(i)
-        P = np.zeros((nP, 5))
+        P = np.zeros((nP, 4))
         for r in range(8):
             idx = Xw[r]
             if idx:

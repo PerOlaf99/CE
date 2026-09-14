@@ -1542,3 +1542,52 @@ Stage 1 (build) done: region0..7 X = 29.5k/58.2k/116.5k/87.1k/87.5k/87.3k/58.2k/
 windows (n_tr ≈ n_va, 48/48).  Stage 2 progress:
     r0 best val 0.7372+ (smoke) … full run: r1 best 0.8504 @ep3 (early stop @ep9),
     r2 0.9096 @ep3 and climbing.  Checkpoints: base_caller_model_v9_r{0..2}.keras.
+
+### Weekend v9 run COMPLETE (checked 2026-09-14 after user returned)
+
+All 8 region CNNs trained (best val acc @ep):
+    r0 0.7631@14  r1 0.8504@3  r2 0.9115@5(redo)  r3 0.9249@4
+    r4 0.9007@4   r5 0.8426@9 r6 0.7118@11       r7 0.6577@5
+
+**Stage 3 corr build had failed** at 16:23 (shape mismatch: build_corr_v9 sized
+`P` `(nP,5)` from the v8 script but v9 CNNs output 4 classes -> ValueError).
+Fixed: `P=np.zeros((nP,4))` + inner-loop var shadowing (`for i, ps in enumerate`).
+Rerun 2026-09-14: corr_training_v9.npz = 83,266 rows (X=(83266,10)), split 50/50,
+regions [4208,8313,16638,12449,12496,12475,8316,8371].
+
+**v9 corrector trained** (64-64-4 MLP, train_corr): region val_acc
+    0.8634@6 0.9343@26 0.9700@30 0.9694@22 0.9592@28 0.9079@22 0.8005@25 0.7042@11
+
+**FULL DE-NOVO, 48 held-out wells (the golden-standard NCBI-blastn bar):**
+    DLL            mean matched = 754.8
+    v9 CNN only    mean matched = 609.6   (delta -145.2, bases 848, pident 91.6)
+    v9 + corr      mean matched = 613.6   (delta -141.2, bases 848, pident 92.0)
+
+**REGRESSION vs the v6/v8 fixed W=15 pipeline (628.5) ⚠** — adaptive-width
+CNN (W_R=8..30) + jitter TRAINED WORSE for the read: mid regions benefit from
+the wide window at ESD positions but the de-novo position quality (dll_peaks
+1-3 scan off-axis) + the label set reset by jitter hurt the read assembly.
+v9+corr 613.6 < v6(v8) 628.5 < DLL-pos ceiling 710.8 < DLL 754.8.
+The adaptive-width idea does NOT beat the fixed window for de-novo assembly;
+the GUI V15 decode (68_connected + per-band DSP) remains the un-tapped lead
+(pure greedy-at-GUI A01 = 688 matched vs v9 A01 ~606).
+
+**First repeatable run of the bar:** `GOLDEN_STANDARD.md` written (2026-09-14)
+documenting the NCBI-blast golden standard with an A01 walkthrough, and pinned
+for future sessions so the metric definitions can never be forgotten.
+
+### User's weekend work (fetched from origin/main 2026-09-14)
+Three commits pushed by the user from home (origin/main d4e6396a):
+- v4: M13-guided iterative Viterbi relabeling (fixes -400 refpos0 SW bug);
+  core begin+mid ~99% acc, mutation standard 100% (23/23 T at rp1273),
+  but full-read coverage lock at the construct-tail overlap zone.
+- v5 "portable book" caller (extract_v5/train_v5): adaptive windows
+  (+/-1.5*fwhm), mobility aux features, spacing-guided consensus columns,
+  NO M13 in the model; beats DLL in every zone; mutation 36/37.
+- v5raw/v5rawnorm dual-input wiring + CRITICAL double-z-score bugfix (live path
+  single-z vs trained double-z -> 30.3% vs 86.1% window acc; fixed to re-z).
+  v5rawnorm tailtail +8.7pp but overall read regression (74 vs 86%), kept as
+  tail-only re-call candidate.
+User's de-novo bar today = v4/v5 family (~86% plate NW vs ESD; M13 core ~99%).
+New to reconcile: user's v4/v5 begin+mid M13-anchored consensus ~99.2% identity,
+546 bp, bit 904, cov 90% (local blastn) vs the DLL 95.4% bar — the tail remains.
