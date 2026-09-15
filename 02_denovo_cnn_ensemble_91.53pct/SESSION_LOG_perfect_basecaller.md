@@ -514,3 +514,99 @@ implements step 2 indel breakdown via semi-global SW vs M13: match/mm/ins/del,
 isolated-vs-contiguous, read-region split (head/mid/tail).  Run on the runtime
 machine with the models+BLAST:
   python3 -u attack_merge.py --wells A01 B04 B05 C09 D12 H11 --metrics
+
+## 2026-09-13 — overlapping per-region basecallers + stitch (region-count sweep)
+
+Question (user): region-specific basecallers with overlap, stitched into a
+final read — how many regions are optimal?  Implemented + ran on the 48-well
+held-out BLAST acceptance test vs Cimarron 3.12 DLL (DLL matched_bp 754.8).
+
+New artifacts in 02_denovo_cnn_ensemble_91.53pct/:
+- region_common.py        region membership + stitch helpers, SPLITS manifest
+- train_region_split.py   train one CNN per region for ANY split (same recipe)
+- eval_region_stitch.py   predict every model on every col once, then sweep
+                          (regions x overlap-margin x stitch) in numpy + BLAST
+- trained region_split{N}_r{r}.keras for N in 2,3,4,5,6,8 (14 epochs, seed 7)
+- region_stitch_sweep.log, region_stitch_rows_*.csv
+
+Method: region boundaries = rank fractions of the usable read.  Margin m makes
+bases within m of a boundary covered by BOTH adjacent models; stitch methods:
+none/conf/wmax (pick max-class-prob model) / vote (mean of class probs).
+
+Result (48-well means, best per count over margin+stitch):
+  regions | baseline(m=0) | best w/ overlap | config
+  2       | 699.7         | 699.7          | (overlap neutral)
+  3       | 706.6         | 708.4          | m=0.02 conf/wmax
+  4       | 702.5(retr)   | 703.4          | m=0.04 vote        (v3 orig m=0 = 701.3)
+  5       | 700.1         | 704.6          | m=0.04 vote
+  6       | 707.5         | 713.3  <-- BEST| m=0.02 vote
+  8       | 709.2         | 709.3          | m=0.02 conf/wmax
+  DLL     | 754.8         | -              | reference
+
+Verdict:
+- Overlap+stitch DOES help: +5.8 matched over the best hard-cut (6-region
+  707.5 -> 713.3); small margins (~0.02-0.04 rank, ~15-30 bases) help, large
+  margins (0.08-0.12) hurt.  mean-prob vote = conf for 1-model cover; near
+  boundaries vote slightly wins at n=6.
+- Sweet spot = SIX regions (cuts .10/.27/.47/.67/.85).  8 is close but its
+  last regions lose per-region val acc (0.67) as data thins; 2-5 underresolve
+  the read (the single big tail region can't sustain BLAST match to read end).
+  Best margin-0 baseline is n=8 (709.2) but overlap only pays off at n=6.
+- Acceptance STILL FAIL: 713.3 vs DLL 754.8 (-41.5), beats DLL on 2/47 wells.
+  The gap closed 701.3 -> 713.3 (+12, half of one earlier gap component) but
+  Cimarron's read still matches further tail M13; remaining = per-column tail
+  accuracy + tail length (same informational gap as before).
+
+## 2026-09-15 — tail-zone/tail-heavy/calibrated-lane dead ends + web "best_basecaller"
+
+Four threads tried to close the last tail-length gap (713.3 vs DLL 754.8). The
+first three are dead ends (documented so we don't retry); the fourth is an
+external DSP caller that actually beats the DLL on correctly-called bases.
+
+### 1. Tail-zone sweep — tighten the damaged 3' zone?  NULL (hurts)
+tailzone_sweep.log, region_stitch_rows_..._t0.60_0.70_0.80_0.90.csv
+Dropping bases beyond a rank tail_frac (0.60/0.70/0.80/0.90) before stitch,
+to shed the low-identity tail end. Best 6-region m=0.02 vote tail_frac=0.9 ->
+matched_bp 712.3, fi 83.65 (beats DLL 2/47). Tail-zone emission is NOT the
+bottleneck: cutting the tail LOSES matched, i.e. the DLL's extra gap to 754.8
+is not surplus garbage bases but bases that genuinely extend the M13 match.
+
+### 2. Tail-heavy splits — more regions packed on the tail?  NULL
+tailheavy_sweep.log, region_stitch_rows_s6,7,8,9_..._tall.csv
+Splits with 7/8/9 regions re-balanced toward the tail (eval_region_stitch
+--tail-heavy). Best remains plain 6-region baseline 713.3; 7 -> 703-707,
+8/9 -> 701-707. Per-region data thins too fast: more tail regions do not
+add tail accuracy.
+
+### 3. Calibrated lane models — train per-lane CNN, stitch whole reads  RUNNING
+build_cal_set.py + cal_training.npz (96 wells x lane-calibrated region cols,
+region_split{N}_cal.keras, train_cal_6_8.log); cal_sweep_eval.log (this is
+the 48-well acceptance run, ~15/48 done). Idea: the 4 color channels have
+lane-specific gain; a per-lane-normalized column feature should localize peaks
+better in the degraded tail. Will append verdict when it lands.
+
+### 4. Web "best_basecaller" (MB1000_M13_DT-tuned DSP)  <-- REAL WINNER
+User fetched best_basecaller.zip (de-novo MegaBACE M13 caller, pure
+numpy/scipy DSP + spacing-tracked peak calling, NO trained model). Smoke test
+passes; ran its WIN_CONFIG on all 96 wells (basecall.py) -> bestweb_calls/.
+Scored per well with OUR blast_bench.blast_eval vs M13 (same metric as the
+DLL/CNN table), compared vs Cimarron DLL ESD (73,523 total matched_bp):
+
+  caller             reads  matched_bp total  mean/well  mean fullid
+  best_basecaller      96   73,523         765.9       83.21%  (0 unaligned)
+  Cimarron DLL ESD     96   72,315         753.3       86.86%
+  our CNN 6-reg(?prod) 48 (held-out)      ~713.3       84.6%
+
+On CORRECTLY-ALIGNED BASES the web caller beats the DLL by +1,208 total
+(+1.7%) and our whole CNN ensemble by ~+53/well, de-novo and with zero
+training. It calls longer reads (mean 920.9, DLL 867.4) and that tail is
+real M13, not garbage. It loses on average identity (fullid 83.2 vs DLL
+86.9) purely because the clean head fraction shrinks as length grows.
+
+Implications for the CNN: the DLL's 41-bp gap to 754.8 could not be closed
+with more regions/calibration, and a tuned DSP caller clears 765.9 with a
+20 min numpy run. Next real lever = OUR tail, called at the DLL's read length
+(DLL 867 x ~91% head identity would land ~787), not more regions. Inspect
+bestweb A01-H12 vs v3 tails col-by-col; port its pullback/spacing logic
+(ema_alpha 0.10, pullback_weight 0.019) into perfect_basecaller's dip/brute
+spacing if tail smearing is the same phenom.
