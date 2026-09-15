@@ -619,3 +619,13 @@ SAME 48 wells -> ACCEPT BAR MET, beats DLL on 32/48. A01: web 786 vs DLL 790
 Mean bases 918.6 (DLL 869.7), mean fullid 83.60 (DLL 86.79). This is the
 first de-novo caller (ours or external) to clear the golden bar.  See
 GOLDEN_STANDARD.md status block.
+
+### 4c. Whole-plate (96-well) golden-standard score
+All 96 wells (A01-H12) x blast_eval, best HSP, per-well table
+saved at /tmp/opencode/wholeplate_tbl.txt:
+  WEB  mean matched = 765.86  (bases 920.9, fullid 83.16%)
+  DLL  mean matched = 753.28  (bases 867.4, fullid 86.85%)
+  web > dll matched on 63/96 wells; 96/96 web reads align (0 unaligned).
+Gap vs the held-out bar comes from 48 non-held-out wells (WEB 763.7 there vs
+DLL 751.7): same long-tail story, web wins matched nearly everywhere and
+clears the whole plate by 12.6 mean matched_bp.
