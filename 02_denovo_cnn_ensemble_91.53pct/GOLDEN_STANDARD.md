@@ -105,6 +105,17 @@ WEB 2026-09-15 (external "best_basecaller", de-novo DSP, NO model)
      also done: 73,523 matched total, 765.9 mean, 0 unaligned).
      Why: it emits a LONGER read whose tail is real M13 (+14 matched) at the
      cost of identity (fullid 83.6 vs 86.8).  Same lesson as the tail-zone null.
+
+TUNED 2026-09-15 (quality-gated pullback sweep, tuned_basecaller.py): pullback
+     0.019 -> 0.012 extends the tail match further (+26/piece) but collapses a
+     few wells into low-quality tracks; gated by mean base qual (fall back to
+     0.019) -> 96/96 wells aligned, no oracle:
+       held-out 48 ... mean matched = 793.42  (fi 83.25, pident 94.55)
+       whole 96 ....... mean matched = 792.62  (fi 83.10, pident 94.44)
+       DLL bar ........ 754.81 held / 753.28 plate  -> beats DLL ~39 mean.
+     A01 = 801 matched (947 bp) > DLL 790.  Best de-novo result to date.
+     (release-pack "track_bases" config, cp_bonus=1.1/baseline 201/adaptive
+      spectral, reproduces 765/801 on A01, is WORSE under this bar: held 756.)
 ```
 
 ---

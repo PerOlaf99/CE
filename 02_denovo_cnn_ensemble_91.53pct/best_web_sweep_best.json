@@ -1,0 +1,20 @@
+{
+  "mean_matched_bp": 792.3829787234042,
+  "mean_fullid": 83.25541757447955,
+  "mean_pident": 94.67621276595744,
+  "mean_qlen": 952.8297872340426,
+  "beat_dll": 39,
+  "config": {
+    "use_gaussian_reconstruction": true,
+    "gaussian_recon_segment_size": 384,
+    "use_combined_channel_score": true,
+    "window_frac": [
+      0.75,
+      1.25
+    ],
+    "local_norm_window": 1800,
+    "channel_peak_bonus": 1.6,
+    "pullback_weight": 0.012,
+    "ema_alpha": 0.1
+  }
+}

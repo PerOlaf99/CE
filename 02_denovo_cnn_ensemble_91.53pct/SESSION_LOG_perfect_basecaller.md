@@ -664,3 +664,32 @@ broadening tail further -> longer reads with real M13 match (+matched), the
 exact same lever the DLL edges us on.  Full grid (35 configs + combos,
 ~20 min as bestweb-sweep systemd unit) is running; final sweep table in
 best_web_sweep.log, winner config in best_web_sweep_best.json.
+
+### 6b. Sweep verdict + quality-gated tuned caller (the win)
+Full 48-well coordinate sweep finished (best_web_sweep.log; log is gitignored
+but reproducible).  Only pullback_weight and ema_alpha move matched_bp; the
+rest are flat.  Signal: pb 0.019 -> 0.012 (leave ema 0.10) +~24 mean on the
+aligned subset, but collapses a few wells (G03 842 -> NO HSP) into a
+low-quality track.  Collapses are identifiable BY THE CALLER: mean base qual
+~1.4 vs ~2.6 on healthy reads.
+
+**Finetuned caller = tuned_basecaller.py** (imported by GUI):
+run TUNED (pb=0.012, ema=0.10, cp=1.6); if mean qual < 1.6 -> rerun BASE
+(pb=0.019).  Golden-standard BLAST (miss=0), 96/96 wells aligned:
+
+  caller              held-48   whole-96   wins vs DLL
+  WEB base ........... 767.98    765.86    32/48
+  TUNED gated ........ 793.42    792.62    ~40/48   <-- BEST
+  DLL reference ...... 754.81    753.28    -
+
+A01 tuned = 801 matched (947 bp, pident 94.3) > DLL 790.  Calls saved in
+tuned_calls/ (FASTA per well, header carries the pb used).
+
+### 6c. track_bases_release.zip (user's new pack) - A/B on the SAME bar
+Verified the pack reproduces its own A01 fasta (903 bp) exactly.  Its config
+(cp_bonus=1.1, baseline_window=201, position_adaptive_spectral=True) is
+WORSE under our golden-standard BLAST than our shipped base: held 756.04,
+plate 751.68 (95/96 aligned); A01 gives 765/801 id in NCBI blastn but matched
+765 < our 786.  Released pack copied into track_bases_release/ for
+provenance.  Its plate "eq" metric (sum eq 79,158 vs Cimarron 78,293) is a
+span proxy, NOT our BLAST matched_bp, so it is not directly comparable.

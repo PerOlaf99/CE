@@ -2915,9 +2915,16 @@ class SequencingGUI(QMainWindow):
         QApplication.processEvents()
 
         try:
+            tuned_dir = os.path.join(here, '02_denovo_cnn_ensemble_91.53pct')
+            if tuned_dir not in sys.path:
+                sys.path.insert(0, tuned_dir)
+            from tuned_basecaller import call_well as _tf_call_well
+            seq, quals, bands, cfg_used = _tf_call_well(rsd_path)
+            tuned_pb = cfg_used['pullback_weight']
+        except Exception:
             from cimarron_basecaller import track_bases
             from cimarron_basecaller.rsd_io import read_rsd, to_acgt_trace
-            win_config = dict(
+            tracked = dict(
                 use_gaussian_reconstruction=True,
                 gaussian_recon_segment_size=384,
                 use_combined_channel_score=True,
@@ -2929,7 +2936,8 @@ class SequencingGUI(QMainWindow):
             )
             rsd = read_rsd(rsd_path)
             trace, order = to_acgt_trace(rsd, base_order='TGCA')
-            seq, quals, bands = track_bases(trace, base_order=order, **win_config)
+            seq, quals, bands = track_bases(trace, base_order=order, **tracked)
+            tuned_pb = None
         except Exception as ex:  # noqa: BLE001 - report any caller failure to the user
             self.status.setText(f'best_basecaller error: {ex}')
             self.progress.setVisible(False)
@@ -2968,14 +2976,17 @@ class SequencingGUI(QMainWindow):
             pass
 
         self.progress.setValue(100)
+        tag = '' if tuned_pb is None else f' (tuned pb={tuned_pb})'
         if m13:
             self.status.setText(
-                f'best_basecaller: {len(seq)} bases, vs ESD={esd_ident:.1f}%, '
+                f'best_basecaller: {len(seq)} bases{tag}, '
+                f'vs ESD={esd_ident:.1f}%, '
                 f'BLAST vs M13 matched_bp={m13["matched"]} '
                 f'(pident {m13["identity"]:.1f})')
         else:
             self.status.setText(
-                f'best_basecaller: {len(seq)} bases, vs ESD={esd_ident:.1f}% '
+                f'best_basecaller: {len(seq)} bases{tag}, '
+                f'vs ESD={esd_ident:.1f}% '
                 f'(BLAST unavailable)')
 
         self._manual_sequence = seq
