@@ -1,54 +1,46 @@
 # NCBI BLAST validation
 
-Metric: **correctly-called bases** from NCBI BLAST+ 2.17.0 `megablast`
-(same engine as the NCBI web BLAST URL API) against the NCBI M13mp18 reference
-`M77815.1`. This replaced an earlier local-alignment ratio metric that was
-misleading (see "Why this metric" below).
+Metric: best HSP per read from NCBI BLAST+ 2.17.0 `megablast` (same engine as
+the NCBI web BLAST URL API) against the NCBI M13mp18 reference `M77815.1`
+(7,250 bp), over all 96 wells of MB1000_M13_DT. Reported for our denovo caller
+and for the Cimarron 3.12 ESD calls.
 
-## Result (96 wells, MB1000_M13_DT)
+## Result
 
-| metric | ours | Cimarron 3.12 (ESD) | delta |
+| metric | ours | Cimarron 3.12 | delta |
 |---|---|---|---|
-| **identical bases** | **73,462** | 72,286 | **+1,176 (+1.6%)** |
-| **aligned length** | **77,136** | 74,726 | **+2,410** |
-| mean % identity | 95.30% | 96.76% | **−1.46** |
-| mean read length | 920.9 | 873.0 | +47.9 |
-| total gaps | 2,226 | 1,967 | +259 |
+| identical bases | **73,462** | 72,286 | **+1,176 (+1.6%)** |
+| aligned length | **77,136** | 74,726 | **+2,410** |
+| coverage of reference (mean) | **11.08%** | 10.74% | **+0.35 pp** |
+| total bit score | 120,047 | **122,831** | -2,784 |
+| mean bit score | 1,250.5 | **1,279.5** | -29.0 |
+| mean % identity | 95.30% | **96.76%** | -1.46 |
+| coverage of read (mean) | 87.25% | **89.18%** | -1.93 pp |
+| longest error-free stretch (mean) | 250.0 | **285.7** | -35.7 |
+| longest error-free stretch (median) | 244 | **288.5** | -44.5 |
+| mean read length | **920.9** | 873.0 | +47.9 |
+| total gaps | 2,226 | **1,967** | +259 |
 
-We now call **more correctly-identified bases and longer alignments** than
-Cimarron 3.12, at **lower average identity**. The two callers sit at different
-points on the identity/coverage frontier; the trade-off is explicit and not
-hidden behind a ratio.
+## Reading the result
 
-Config: `pullback_weight=0.019`, `channel_peak_bonus=1.6`,
-`local_norm_window=1800`, `window_frac=(0.75,1.25)`,
-`gaussian_recon_segment_size=384` (all Gaussian/combined-score/band-filter
-stages on). Robust: `pullback_weight` 0.018–0.021 all beat Cimarron.
+This is a genuine trade-off, not a clean sweep:
 
-## Why this metric
+- **We call more data.** More identical bases (+1,176), longer alignments
+  (+2,410) and more of the reference covered (11.08% vs 10.74%). This is the
+  "total correctly-called bases" objective.
+- **Cimarron is more accurate per base.** Better bit score, higher %ID,
+  higher fraction of each read that aligns, and a longer error-free stretch
+  (285.7 vs 250.0 bases on average). Shorter reads make longer perfect runs
+  easier, but the gap is large relative to the read-length difference.
+- `longest error-free stretch` = longest run of consecutive matching columns
+  (gaps break the run) within the best HSP.
 
-An earlier committed version of this folder claimed a win using the repo's
-`perbase_vs_ref` ratio (91.72% vs 90.72%). That was wrong: the ratio rewards a
-*shorter, cleaner* read. Counting actual bases over the whole plate:
+## Configuration
 
-```
-                ours        Cimarron
-bases called    79,304      83,805
-correct bases   75,758      79,279     <- Cimarron ahead by 3,521
-identity        91.69%      90.71%
-```
-
-Cimarron called ~4,500 more bases and got ~3,500 more of them right. The higher
-ratio simply came from calling fewer bases. NCBI BLAST confirms it: at our
-old config Cimarron led with **72,313 vs 70,289 identical bases (+2.8%)**.
-
-A per-window analysis by reference position showed Cimarron's edge was coverage
-in the degraded 3' end (template ~800–900): it covered ~8,800 base-slots there
-vs our ~5,000. BLAST's local alignment discards the unalignable tail, so simply
-un-trimming did nothing — the extra bases had to be *positioned correctly*.
-Retuning the spacing tracker's pull-back weight (0.03 → 0.019) let the local
-spacing model track the broadening peaks at both ends, recovering that
-coverage with enough correctness to overtake Cimarron's total.
+Final `WIN_CONFIG`: `use_gaussian_reconstruction=True`,
+`gaussian_recon_segment_size=384`, `use_combined_channel_score=True`,
+`window_frac=(0.75,1.25)`, `local_norm_window=1800`, `channel_peak_bonus=1.6`,
+`pullback_weight=0.019`, `ema_alpha=0.10`.
 
 ## Reproduce
 
@@ -58,5 +50,6 @@ BLAST_DIR=/path/to/ncbi-blast-*/bin python blast_eval.py   # -> report_blast.jso
 python eval_plate.py                 # canonical ratio -> report.json
 ```
 
-`blast_eval.py` downloads `M77815.1` from NCBI and builds its own BLAST
-database, so the reference is the authentic NCBI M13 genome.
+`blast_eval.py` downloads `M77815.1` from NCBI, builds its own BLAST database,
+and reports identical bases, aligned length, %ID, bit score, coverage (vs
+reference and vs read) and longest error-free stretch for both callers.

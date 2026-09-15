@@ -4,20 +4,25 @@ De-novo, reference-free basecaller for the MegaBACE MB1000_M13_DT plate.
 It **calls more correctly-identified bases than Cimarron 3.12** when measured
 with NCBI BLAST+ against the authentic NCBI M13mp18 reference (`M77815.1`).
 
-## Headline result (96 wells, NCBI BLAST+ megablast)
+## Headline result (96 wells, NCBI BLAST+ megablast, best HSP per read)
 
 | metric | ours | Cimarron 3.12 (ESD) | delta |
 |---|---|---|---|
 | **identical bases** | **73,462** | 72,286 | **+1,176 (+1.6%)** |
 | **aligned length** | **77,136** | 74,726 | **+2,410** |
-| mean % identity | 95.30% | 96.76% | **−1.46** |
-| mean read length | 920.9 | 873.0 | +47.9 |
-| total gaps | 2,226 | 1,967 | +259 |
+| **coverage of reference (mean)** | **11.08%** | 10.74% | **+0.35 pp** |
+| total bit score | 120,047 | **122,831** | -2,784 |
+| mean bit score | 1,250.5 | **1,279.5** | -29.0 |
+| mean % identity | 95.30% | **96.76%** | -1.46 |
+| coverage of read (mean) | 87.25% | **89.18%** | -1.93 pp |
+| longest error-free stretch (mean) | 250.0 | **285.7** | -35.7 |
+| mean read length | **920.9** | 873.0 | +47.9 |
 
-We win on **total correct bases** (the objective this work was set) and on
-aligned length, and lose on **average identity**, because we call longer reads.
+We win on **total correct bases**, aligned length and reference coverage; we
+lose on **bit score, %ID, read coverage and longest error-free stretch**,
+because we call longer reads (higher throughput, lower per-base accuracy).
 The two callers sit at different points on the identity/coverage frontier; see
-`BLAST_RESULTS.md` for why the total-base count is the honest comparison here.
+`BLAST_RESULTS.md` for the full breakdown.
 
 For reference, the repo's canonical `perbase_vs_ref` ratio on this config is
 **88.88%** vs Cimarron 90.72%. That ratio rewards shorter, cleaner reads and
