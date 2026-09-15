@@ -214,6 +214,7 @@ class SequencingGUI(QMainWindow):
         self._saved_lims = {}
         self._smooth_mode = 'Savitzky-Golay'
         self._manual_sequence = ''
+        self._web_calls = None
         self._shift_lines = {}
         self._drag_channel = None
         self._drag_start_x = 0
@@ -960,6 +961,14 @@ class SequencingGUI(QMainWindow):
             "which is circular.")
         self.peakcall_btn.clicked.connect(self._run_independent_peakcall)
         bottom.addWidget(self.peakcall_btn)
+        self.web_btn = QPushButton('Run best_basecaller (web)')
+        self.web_btn.setToolTip(
+            'Run the external de-novo DSP basecaller (best_basecaller/) on '
+            'the loaded well and show its called bases over the separated '
+            'trace. Reports agreement vs ESD (NW) and the golden-standard '
+            'NCBI-BLAST matched_bp vs M13.')
+        self.web_btn.clicked.connect(self._run_best_basecaller)
+        bottom.addWidget(self.web_btn)
         self.mobility_btn = QPushButton('Auto mobility shift (calib. run)')
         self.mobility_btn.setToolTip(
             'Cross-correlates channels to estimate a constant per-channel '
@@ -1747,6 +1756,7 @@ class SequencingGUI(QMainWindow):
             self.esd_offset_spin.setValue(int(self.esd_offset))
             self.esd_offset_spin.blockSignals(False)
             self.current_well = well
+            self._web_calls = None
             n_peaks = len(self.esd_data.get('peak_positions', []))
             # Sanity-check the chosen ESD variant: peak_positions are supposed
             # to sit on the same (positive-scan) coordinate grid as the RSD
@@ -2233,6 +2243,37 @@ class SequencingGUI(QMainWindow):
                      va='top')
             ax3.text(region[1] - 2, 0.97, 'stop', fontsize=6, color='gray',
                      va='top', ha='right')
+
+        # best_basecaller (web) overlay: its own spacing-tracked calls, drawn
+        # as a base-letter row near the top of the separated panel, the same
+        # band style as the ESD row on panel 4, so the two callers' base
+        # placement can be compared directly against the signal.  Stored per
+        # well in self._web_calls by _run_best_basecaller.
+        wc = getattr(self, '_web_calls', None)
+        if wc and wc.get('well') == self.current_well:
+            web_seq = wc['seq']
+            for idx, tb in enumerate(wc['bands']):
+                if idx >= len(web_seq):
+                    break
+                p = int(getattr(tb, 'position', tb))
+                if p < 0 or p >= len(sep_disp):
+                    continue
+                base = web_seq[idx].upper()
+                if base not in BASE_LETTERS:
+                    color = 'gray'
+                else:
+                    ch = BASE_LETTERS.index(base)
+                    color = CHAN_COLORS[ch]
+                ax3.text(p, 0.93, base, transform=ax3.get_xaxis_transform(),
+                         fontsize=6, ha='center', va='center', color='black',
+                         fontweight='bold', clip_on=True,
+                         bbox=dict(facecolor=color, alpha=0.35, pad=0.2,
+                                   edgecolor='none'))
+            ax3.text(0.01, 0.99, 'best_basecaller (web)',
+                     transform=ax3.transAxes, fontsize=6, ha='left', va='top',
+                     color='black',
+                     bbox=dict(facecolor='white', alpha=0.7, pad=0.15,
+                               edgecolor='gray'))
 
         # ESD peak positions/sequence are still read here (needed for the
         # ESD-match% comparison text below and for ax4), just not drawn as
@@ -2839,6 +2880,112 @@ class SequencingGUI(QMainWindow):
             f'Independent peak-call: {len(called_seq)} bases called '
             f'(ESD has {len(esd_seq)}) - alignment identity vs ESD: '
             f'{identity:.1f}%')
+
+    def _run_best_basecaller(self):
+        """Run the external de-novo DSP 'best_basecaller' (numpy/scipy only,
+        no trained model) on the loaded well and visualize its calls.
+
+        The caller reads the raw .rsd itself (read_rsd -> to_acgt_trace with
+        the plate's TGCA order), walks the trace with spacing-tracked peaks
+        and returns (seq, quals, bands).  We then:
+          - overlay its band positions/base letters on the separated panel,
+          - report NW agreement vs the ESD call (fair, alignment-based), and
+          - report the golden-standard NCBI-BLAST matched_bp vs M13mp18.
+        """
+        well = self.current_well
+        if well is None or self.rsd_raw is None:
+            self.status.setText('Load a well first')
+            return
+        here = os.path.dirname(os.path.abspath(__file__))
+        pkg = os.path.join(here, 'best_basecaller')
+        if not os.path.isdir(pkg):
+            self.status.setText('best_basecaller/ package missing next to this script')
+            return
+        if pkg not in sys.path:
+            sys.path.insert(0, pkg)
+        rsd_path = os.path.join(self.data_dir, f'{well}.rsd')
+        if not os.path.exists(rsd_path):
+            self.status.setText(f'Missing: {rsd_path}')
+            return
+
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(15)
+        self.status.setText('Running best_basecaller (web DSP)...')
+        QApplication.processEvents()
+
+        try:
+            from cimarron_basecaller import track_bases
+            from cimarron_basecaller.rsd_io import read_rsd, to_acgt_trace
+            win_config = dict(
+                use_gaussian_reconstruction=True,
+                gaussian_recon_segment_size=384,
+                use_combined_channel_score=True,
+                window_frac=(0.75, 1.25),
+                local_norm_window=1800,
+                channel_peak_bonus=1.6,
+                pullback_weight=0.019,
+                ema_alpha=0.10,
+            )
+            rsd = read_rsd(rsd_path)
+            trace, order = to_acgt_trace(rsd, base_order='TGCA')
+            seq, quals, bands = track_bases(trace, base_order=order, **win_config)
+        except Exception as ex:  # noqa: BLE001 - report any caller failure to the user
+            self.status.setText(f'best_basecaller error: {ex}')
+            self.progress.setVisible(False)
+            return
+
+        self.progress.setValue(60)
+        QApplication.processEvents()
+        self._web_calls = {
+            'well': well,
+            'seq': seq,
+            'quals': np.asarray(quals, dtype=float),
+            'bands': list(bands),
+        }
+
+        clean = ''.join(c for c in seq if c in 'ACGT')
+        esd_ident = 0.0
+        esd_path = os.path.join(self.data_dir,
+                                self.esd_combo.currentData() or '',
+                                f'{well}.esd')
+        if os.path.exists(esd_path):
+            try:
+                esd_seq = parse_esd(esd_path).get('sequence', '')
+                from peak_calling import nw_identity as _nw_esd
+                esd_ident = _nw_esd(clean, esd_seq, max_len=20000)
+            except Exception:  # noqa: BLE001
+                pass
+
+        m13 = None
+        try:
+            tk = os.path.join(here, 'sanger_toolkit')
+            if tk not in sys.path:
+                sys.path.insert(0, tk)
+            from blast_bench import blast_eval
+            m13 = blast_eval(clean)
+        except Exception:  # noqa: BLE001 - BLAST is a bonus metric, never fatal
+            pass
+
+        self.progress.setValue(100)
+        if m13:
+            self.status.setText(
+                f'best_basecaller: {len(seq)} bases, vs ESD={esd_ident:.1f}%, '
+                f'BLAST vs M13 matched_bp={m13["matched"]} '
+                f'(pident {m13["identity"]:.1f})')
+        else:
+            self.status.setText(
+                f'best_basecaller: {len(seq)} bases, vs ESD={esd_ident:.1f}% '
+                f'(BLAST unavailable)')
+
+        self._manual_sequence = seq
+        header = f'>{well}_best_basecaller len={len(seq)}'
+        wrapped = '\n'.join(seq[i:i + 80] for i in range(0, len(seq), 80))
+        self._fasta_box.setText(f'{header}\n{wrapped}')
+        self._fasta_box.setReadOnly(True)
+        self.ml_fasta_btn.setEnabled(False)
+        self._schedule_update()
+        QTimer.singleShot(4000, lambda: self.progress.setVisible(False))
 
     def _open_reference_dialog(self):
         ReferenceDialog(self).exec_()

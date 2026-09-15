@@ -629,3 +629,20 @@ saved at /tmp/opencode/wholeplate_tbl.txt:
 Gap vs the held-out bar comes from 48 non-held-out wells (WEB 763.7 there vs
 DLL 751.7): same long-tail story, web wins matched nearly everywhere and
 clears the whole plate by 12.6 mean matched_bp.
+
+### 5. best_basecaller integrated into GUI V15
+- Added vendored `best_basecaller/` package at repo root (basecall.py +
+  cimarron_basecaller, numpy/scipy only, from user's web download).
+- New bottom-bar button **"Run best_basecaller (web)"** in
+  sequencing_gui_V15.py -> _run_best_basecaller():
+  * runs the caller's WIN_CONFIG on the loaded .rsd (read_rsd ->
+    to_acgt_trace order TGCA -> track_bases);
+  * draws the called base letters at the caller's own band positions as a
+    row on the SEPARATED panel (same band style as the ESD row on panel 4),
+    so both callers' base placement is visible against the signal;
+  * status line: N bases + vs ESD NW identity + golden-standard BLAST
+    matched_bp/pident vs M13;
+  * fills the FASTA box with ><well>_best_basecaller record.
+- Verified headlessly on A01: 894 bases, 786 matched_bp (pident 94.2) —
+  identical to the offline golden-standard run.  Overlay coordinates match
+  because the package reads the same 9647-scan RSD grid as the GUI.
