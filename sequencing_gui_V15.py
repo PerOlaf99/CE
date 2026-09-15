@@ -2541,8 +2541,6 @@ class SequencingGUI(QMainWindow):
                     esd_txt = f'ESD: {esd_m}/{esd_t} bases ({esd_pct:.1f}%)'
                     if n_fill:
                         esd_txt += f' · {n_fill} filled-in'
-                    self._manual_sequence = iupac_seq
-                    self._update_fasta_box(iupac_seq)
             except Exception as e:
                 self._manual_sequence = ''
                 self._fasta_box.setText('')
@@ -2875,6 +2873,8 @@ class SequencingGUI(QMainWindow):
             return
         positions, called_seq, heights = pc_call_bases(sep_shifted)
         self._independent_seq = called_seq
+        self._manual_sequence = called_seq
+        self._update_fasta_box(called_seq)
         identity = pc_nw_identity(called_seq, esd_seq, max_len=20000)
         self.status.setText(
             f'Independent peak-call: {len(called_seq)} bases called '
