@@ -610,3 +610,12 @@ with more regions/calibration, and a tuned DSP caller clears 765.9 with a
 bestweb A01-H12 vs v3 tails col-by-col; port its pullback/spacing logic
 (ema_alpha 0.10, pullback_weight 0.019) into perfect_basecaller's dip/brute
 spacing if tail smearing is the same phenom.
+
+### 4b. Golden-standard re-check (48 held-out wells) — PASSES
+Scored exactly per GOLDEN_STANDARD.md (blast_eval on the 48 v3_training
+split-0 wells): web mean matched 767.98 >= DLL 754.81 (doc 754.8) on the
+SAME 48 wells -> ACCEPT BAR MET, beats DLL on 32/48. A01: web 786 vs DLL 790
+(still behind there); win comes from the long-tail wells (G03: 842 vs 802).
+Mean bases 918.6 (DLL 869.7), mean fullid 83.60 (DLL 86.79). This is the
+first de-novo caller (ours or external) to clear the golden bar.  See
+GOLDEN_STANDARD.md status block.

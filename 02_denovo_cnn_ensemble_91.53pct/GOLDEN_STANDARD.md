@@ -97,6 +97,14 @@ OUR v9 weekend (de-novo) ... mean matched = 609.6   (regression — needs corr)
 OUR v9 + corr (de-novo) .... mean matched = 613.6   (+4, still below v8)
 v3 CNN (48-wells, 2026-09-11) mean matched = 701.3
 ESD (span: the reference for per-column) ... 99.94% identity on same columns
+
+WEB 2026-09-15 (external "best_basecaller", de-novo DSP, NO model)
+     mean matched = 767.98  (48 wells, >= 754.8 -> PASSES the bar; beats DLL 32/48)
+     mean bases = 918.6, mean fullid = 83.60% (DLL 869.7 / 86.79%)
+     calls in 02_denovo_cnn_ensemble_91.53pct/bestweb_calls/ (whole 96-well plate
+     also done: 73,523 matched total, 765.9 mean, 0 unaligned).
+     Why: it emits a LONGER read whose tail is real M13 (+14 matched) at the
+     cost of identity (fullid 83.6 vs 86.8).  Same lesson as the tail-zone null.
 ```
 
 ---
