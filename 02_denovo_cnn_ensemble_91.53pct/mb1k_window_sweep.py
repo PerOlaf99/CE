@@ -48,6 +48,11 @@ HELD = set('A01 A03 A05 A07 A09 A11 B02 B04 B06 B08 B10 B12 '
            'G01 G03 G05 G07 G09 G11 H02 H04 H06 H08 H10 H12'.split())
 
 
+def cfg(pb=0.012, ema=0.10, bonus=1.6, wfrac=(0.75, 1.25)):
+    return dict(BASE_CONFIG, pullback_weight=pb, ema_alpha=ema,
+                channel_peak_bonus=bonus, window_frac=wfrac)
+
+
 def load_wells(which):
     wells = sorted(x[:-4] for x in os.listdir(PLATE) if x.endswith('.rsd'))
     if which == 'held':
@@ -79,10 +84,6 @@ def main():
     print(f'{len(wells)} wells ({args.wells}), plate {PLATE}', flush=True)
 
     base = 'pullback_weight:0.012,ema_alpha:0.10,channel_peak_bonus:1.6,window_frac:(0.75,1.25)'
-
-    def cfg(pb=0.012, ema=0.10, bonus=1.6, wfrac=(0.75, 1.25)):
-        return dict(BASE_CONFIG, pullback_weight=pb, ema_alpha=ema,
-                    channel_peak_bonus=bonus, window_frac=wfrac)
 
     # Curated stage-1 grid around the shipped tuned optimum.
     configs = [

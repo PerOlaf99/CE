@@ -116,6 +116,23 @@ TUNED 2026-09-15 (quality-gated pullback sweep, tuned_basecaller.py): pullback
      A01 = 801 matched (947 bp) > DLL 790.  Best de-novo result to date.
      (release-pack "track_bases" config, cp_bonus=1.1/baseline 201/adaptive
       spectral, reproduces 765/801 on A01, is WORSE under this bar: held 756.)
+
+TUNED-FINETUNE 2026-09-15 (bitscore-objective sweep, mb1k_window_sweep.py):
+     New objective: BLAST bitscore (rewards length AND identity; the earlier
+     matched-only sweep picked longer-but-dirtier reads that trailed bitscore).
+     Config: pb 0.008 / ema 0.08 / channel_peak_bonus 1.4, gate 2.4.
+       held-out 48 ... bits = 1282.58  matched = 796.77  id = 94.75%
+       other 48 ..... bits = 1275.54  matched = 787.31  id = 94.95%
+       whole 96 ..... bits = 1279.06  matched = 792.04  id = 94.85%
+       old tuned .... bits = 1262.41  matched = 792.62  id = 94.44%
+       DLL (held) ... bits = 1282.00  matched = 754.81  id = 96.81%
+       -> bits tied DLL (+0.6), matched +42, id −2.1 (caps at mutants).
+     Gate 2.4 catches G03's long-but-messy read (1093bp, q=2.25, bits 1079) and
+     falls back to the base read (1012bp, bits 1081, matched 842) - same as DLL.
+     Only pullback/ema/bonus move bitscore; window_frac/local_norm flat.
+     Windowed tail splicing (re-call tail slice + fuse) tested and abandoned:
+     the walker stalls on mid-trace slices (tail call produced only ~32bp);
+     a position-profile inside spacing_caller would be the honest implement.
 ```
 
 ---

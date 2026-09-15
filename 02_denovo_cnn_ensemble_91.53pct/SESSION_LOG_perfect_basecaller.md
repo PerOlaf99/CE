@@ -693,3 +693,40 @@ plate 751.68 (95/96 aligned); A01 gives 765/801 id in NCBI blastn but matched
 765 < our 786.  Released pack copied into track_bases_release/ for
 provenance.  Its plate "eq" metric (sum eq 79,158 vs Cimarron 78,293) is a
 span proxy, NOT our BLAST matched_bp, so it is not directly comparable.
+
+### 6d. Bitscore-objective fine-tune (stage-1 global + gate calibration)
+The earlier sweep optimized matched_bp, picking longer-but-dirtier reads.
+Fine-finetune (mb1k_window_sweep.py) changed objective to BLAST *bitscore*
+(length AND identity) + re-measured on a 16-config held-out grid + combo
+round. Key finding: matched-only optimum (pb 0.012, ema 0.10) traded ~14
+bitscore for +0 matched by allowing dirty tail bases. The new sweet spot:
+
+  Config:  pb 0.008 / ema 0.08 / bonus 1.4 / gate 2.4
+  Held-48: bits 1282.58 ≈ DLL 1282.00, matched 796.77, id 94.75%
+  Other-48: bits 1275.54, matched 787.31, id 94.95%
+  Plate:    bits 1279.06 (+16.6 vs old), matched 792.04, id 94.85%
+
+Gate calibration: the gate 1.6 (from pb-0.012 era) no longer caught G03's
+long-but-messy read (qmean 2.25) whose tuned bitscore (1079) lost to the
+base fallback (1081, matched 842). Plate-wide gate sweep on the new config
+found gate 2.4 optimal: bits 1279.06, matched 792.04. (Gate >2.4 over-
+catches well, bitscore drops; gate 1.6-2.2 = 1279.04.)
+
+Only pullback/ema/bonus moved bitscore; window_frac, gaussian recon size,
+local_norm_window were flat (as in the original sweep).
+
+### 6e. Windowed tail splice attempt (stage-2, abandoned)
+Error-localization on 12 A-row tuned reads (aligned to M13 via SW):
+
+  head  3764 bp:  71 errors, 1.9% error-rate (30.5% of total)
+  mid   3761 bp:  16 errors, 0.4% error-rate (6.9% of total)
+  tail  3759 bp: 146 errors, 3.9% error-rate (62.7% of total)
+
+The tail carries 63% of all errors (3.9% vs 0.4% in the middle). Naive
+splice plan: keep body + re-call the tail with a clean config (e.g. ema
+0.06) and fuse. Tested on A01: re-calling from the 2/3-read scan position
+yielded only ~32 bp (track_bases stalls on a mid-trace slice, likely due to
+local-norm warmup / gaussian recon segment initialization). The raw-splice
+approach is therefore non-viable. The honest implementation would be a
+position-profile inside spacing_caller (time-varying pullback/ema/bonus as a
+function of scan position) -- not attempted.

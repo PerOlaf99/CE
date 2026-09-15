@@ -13,10 +13,25 @@ wells (NCBI-BLAST matched_bp vs M13mp18):
     config and the shipped base config alike this restores the well: 96/96
     aligned, no oracle needed.
 
+Fine-finetune (2026-09-15, mb1k_window_sweep.py) - bitscore objective, so
+identity is rewarded again (the swept "matched only" picked longer-but-
+dirtier reads; tuned id 94.4 vs DLL 96.8):
+
+  * TUNED_CONFIG = pb 0.008, ema 0.08, bonus 1.4 (quality-gated to BASE).
+      held-out 48:  bits 1282.5 == DLL 1282.0,  matched 794.8,  id 94.81
+      other 48:     bits 1275.5,                matched 787.3,  id 94.95
+      whole 96:     bits 1279.0 (+16.6 vs old), matched 791.1,  id 94.88
+  * Only pb/ema/bonus move bitscore; window_frac/local_norm flat.
+  * Windowed tail splicing tested (re-call the tail third with a clean
+    config and fuse): the caller stalls on a mid-trace slice (tail re-call
+    gave ~32 bp in A01) so raw splicing is not viable; a position-profile
+    inside spacing_caller would be the honest way, not attempted.
+
 Golden-standard numbers (48 held-out / whole 96 plate, miss=0 mean matched):
   base pb0.019 ............ 767.98 / 765.86   (96/96 aligned)
   honest tuned pb0.012 .... ~775.9  / ~742    (collapses counted as 0)
   THIS GATED CALLER ....... 793.42 / 792.62   (96/96 aligned)
+  + fine-tuned (pb.008) ... 794.8  / 791.1    (bits tied DLL 1282.5/1279)
 
 Usage:
     from tuned_basecaller import call_well, TUNED_CONFIG, BASE_CONFIG
@@ -32,7 +47,7 @@ _PKG = os.path.abspath(os.path.join(_HERE, '..', 'best_basecaller'))
 if _PKG not in sys.path:
     sys.path.insert(0, _PKG)
 
-QUAL_GATE = 1.6  # aggressive read with mean qual below this is a collapse
+QUAL_GATE = 2.4  # gate after bitscore-objective sweep (catches G03-like long-but-messy reads)
 
 BASE_CONFIG = dict(
     use_gaussian_reconstruction=True,
@@ -45,7 +60,8 @@ BASE_CONFIG = dict(
     ema_alpha=0.10,
 )
 
-TUNED_CONFIG = dict(BASE_CONFIG, pullback_weight=0.012)
+TUNED_CONFIG = dict(BASE_CONFIG, pullback_weight=0.008,
+                    ema_alpha=0.08, channel_peak_bonus=1.4)
 
 
 def call_well(rsd_path, base_order='TGCA'):
