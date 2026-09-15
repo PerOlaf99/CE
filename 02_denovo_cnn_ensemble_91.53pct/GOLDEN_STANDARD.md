@@ -126,13 +126,30 @@ TUNED-FINETUNE 2026-09-15 (bitscore-objective sweep, mb1k_window_sweep.py):
        whole 96 ..... bits = 1279.06  matched = 792.04  id = 94.85%
        old tuned .... bits = 1262.41  matched = 792.62  id = 94.44%
        DLL (held) ... bits = 1282.00  matched = 754.81  id = 96.81%
-       -> bits tied DLL (+0.6), matched +42, id −2.1 (caps at mutants).
+       -> bits tied DLL (+0.6), matched +42, id -2.1 (caps at mutants).
      Gate 2.4 catches G03's long-but-messy read (1093bp, q=2.25, bits 1079) and
      falls back to the base read (1012bp, bits 1081, matched 842) - same as DLL.
      Only pullback/ema/bonus move bitscore; window_frac/local_norm flat.
-     Windowed tail splicing (re-call tail slice + fuse) tested and abandoned:
-     the walker stalls on mid-trace slices (tail call produced only ~32bp);
-     a position-profile inside spacing_caller would be the honest implement.
+
+POSITION-PROFILE 2026-09-15 (track_bases pos_profile, mb1k_posprofile_sweep.py):
+     Honest replacement for the abandoned windowed tail splice: parameters are
+     now a function of read position (linear interp of ema/pullback/min-prom/
+     bonus vs scan-fraction; byte-identical to scalar config when flat).
+     Error localization -> tail third carries 63% of errors; the killer was
+     NOT error-rate but tail SPACING divergence from the mid-read global
+     median - pulling back toward it there loses tail bases.  Profile: loosen
+     pullback 0.008 -> 0.001 across the last 2/3 of the read (frac 0.33).
+       held-out 48 ... bits = 1290.54  matched = 818.60  id = 94.00%
+       other 48 ..... bits = 1277.12  matched = 813.58  id = 93.87%
+       whole 96 ..... bits = 1283.83  matched = 816.09  id = 93.94%
+       flat (pre) ... bits = 1279.06  matched = 792.04  id = 94.85%
+       DLL (held) ... bits = 1282.00  matched = 754.81  id = 96.81%
+       DLL (plate) .. bits = 1278.3   matched = 753.3   id = 96.8%
+       -> beats DLL on BOTH metrics on BOTH splits: held bits +8.5,
+          matched +64/well; plate bits +5.5, matched +63/well.
+       Fast-EMA tails, loose-prominence, and bonus ramps all lost; only the
+       pullback ramp helped.  Tail error-rate unchanged (~8.4%) - gains are
+       recovered tail length, not cleaner bases.
 ```
 
 ---

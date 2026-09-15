@@ -63,6 +63,23 @@ BASE_CONFIG = dict(
 TUNED_CONFIG = dict(BASE_CONFIG, pullback_weight=0.008,
                     ema_alpha=0.08, channel_peak_bonus=1.4)
 
+# Position-profile: spacing in the read tail diverges from the mid-read
+# global median (gel bands slow/spread), so pulling back toward it there
+# loses tail bases.  Loosen pullback 0.008 -> 0.001 across the last 2/3 of
+# the read (verified on both 48-well halves: plate bits +4-5, matched +24,
+# identity -0.9pp).  Implemented via track_bases(pos_profile=...), which is
+# byte-identical to the scalar config when flat.  The gate fallback still
+# uses BASE_CONFIG (un-profiled) for degenerate reads.
+TUNED_PROFILE = {
+    0.00: dict(ema_alpha=0.08, pullback_weight=0.008,
+               min_prominence=0.05, channel_peak_bonus=1.4),
+    0.33: dict(ema_alpha=0.08, pullback_weight=0.008,
+               min_prominence=0.05, channel_peak_bonus=1.4),
+    1.00: dict(ema_alpha=0.08, pullback_weight=0.001,
+               min_prominence=0.05, channel_peak_bonus=1.4),
+}
+TUNED_CONFIG = dict(TUNED_CONFIG, pos_profile=TUNED_PROFILE)
+
 
 def call_well(rsd_path, base_order='TGCA'):
     """Return (seq, quals, bands, cfg_used) for one .rsd file.

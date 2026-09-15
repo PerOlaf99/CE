@@ -730,3 +730,37 @@ local-norm warmup / gaussian recon segment initialization). The raw-splice
 approach is therefore non-viable. The honest implementation would be a
 position-profile inside spacing_caller (time-varying pullback/ema/bonus as a
 function of scan position) -- not attempted.
+
+### 6f. Position-profile in track_bases (stage-2, honest fix for the tail)
+The windowed splice (6e) failed because track_bases stalls on a mid-trace
+slice.  Rebuilt the idea properly: a `pos_profile` kwarg on track_bases
+makes ema_alpha / pullback_weight / min_prominence / channel_peak_bonus
+linear functions of read scan-fraction (breakpoints sorted, must span
+0.0->1.0; any profiled param at all breakpoints).  Flat or None profile is
+byte-identical to the scalar path (regression-gated on 6 wells).  The
+position-dependent channel_peak_bonus re-derives the boosted envelope
+per-window (else the precomputed fast path stands).
+
+Sweep (mb1k_posprofile_sweep.py, 48 held-out, bitscore objective):
+  - Tightening pullback/ema/prominence in the tail HURTS bitscore (long
+    tail reads, base config ~1230).  Fast-EMA tail collapses (1204).
+  - channel_peak_bonus ramp: ~flat (1280).
+  - LOOSENING pullback in the tail (0.008 -> 0.001) is the winner:
+      held bits 1292.5 (flat 1282.6), matched 818.4; other bits 1273.9
+      (flat 1275.5), matched 813.6.
+  - Refined grid: ramp start 0.33 is positive on BOTH halves
+      (held +7.9 bits, other +1.6; rampf.50 was +9.9/-1.6), plate-best.
+  - Adopted: pullback 0.008 -> 0.001 over frac 0.33..1.0 (TUNED_PROFILE).
+    Authoritative plate (regenerated tuned_calls, 96/96 aligned):
+      held  1290.54 bits / 818.60 matched / 94.00% id
+      other 1277.12 / 813.58 / 93.87%
+      plate 1283.83 / 816.09 / 93.94%
+      DLL   held 1282.00 / 754.81 / 96.81%;  plate ~1278.3 / 753.3
+    -> now BEATS the DLL on both bitscore and matched, on both halves.
+  - Insight: the tail failure mode is spacing DIVERGENCE from the global
+    median (gel bands slow/spread), not merely base-quality; pullback
+    against a mid-read median loses tail bases.  Tail error-rate stayed
+    ~8.4% - the gain is recovered tail length, not cleaner bases.
+  - Error-localization SW needed rc(read) vs plus-strand M13 (reads are
+    reverse-complement to refs/m13_M77815.1.fa); global alignment mis-scores
+    a 1kb substring in 7.2kb ref, so it's local Smith-Waterman.

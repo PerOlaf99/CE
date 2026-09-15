@@ -803,6 +803,15 @@ def track_bases(
     # in and available to opt into / keep tuning, not removed, since the
     # mechanism is sound (this is a real, diagnosed failure mode) but the
     # current threshold isn't there yet.
+    pos_profile: dict | None = None,  # time-varying per-position parameters --
+    # {read_fraction: {param: value}} interpolated linearly across the read
+    # (fractions must span 0.0 -> 1.0). Honest form of the windowed tail
+    # splice idea: the tail third carries ~63% of residual errors (3.9%
+    # error-rate vs 0.4% in the middle), so being able to dial ema_alpha /
+    # pullback_weight / min_prominence / channel_peak_bonus up or down as a
+    # function of scan position is the clean lever for it. A None (or flat)
+    # profile is byte-identical to the scalar behavior. Param keys, if
+    # present at all, must be present at EVERY breakpoint.
 ) -> tuple[str, list[float], list[TrackedBase]]:
     """Walk the trace predicting each next base position from a running
     local spacing estimate. Returns (sequence, qualities, tracked_bases).
@@ -887,6 +896,36 @@ def track_bases(
         envelope = boosted.max(axis=1)
         best_channel = boosted.argmax(axis=1)
 
+    # ---- pos_profile normalization -------------------------------------
+    # Each parameter is a piecewise-linear function of pos/n. Params not in
+    # the profile fall back to their scalar argument. Requires >=2 sorted
+    # breakpoints spanning [0.0, 1.0], and any profiled param present at
+    # every breakpoint.
+    _profile_fracs = None
+    _profile_vals: dict[str, np.ndarray] = {}
+    _profiled = set()
+    if pos_profile is not None:
+        pp = sorted((float(f), dict(d)) for f, d in pos_profile.items())
+        if len(pp) < 2 or pp[0][0] != 0.0 or pp[-1][0] != 1.0:
+            raise ValueError("pos_profile needs >=2 breakpoints spanning 0.0 -> 1.0")
+        _ALLOWED = ("ema_alpha", "pullback_weight", "min_prominence", "channel_peak_bonus")
+        for _f, _d in pp:
+            for k in _d:
+                if k not in _ALLOWED:
+                    raise ValueError(f"pos_profile param {k!r} unsupported (allowed: {_ALLOWED})")
+        for _f, _d in pp:
+            _profiled |= set(_d)
+        for p in _profiled:
+            if any(p not in _d for _, _d in pp):
+                raise ValueError(f"pos_profile param {p!r} must be defined at every breakpoint")
+        _profile_fracs = np.array([f for f, _ in pp])
+        _profile_vals = {p: np.array([d[p] for _, d in pp], float) for p in _profiled}
+    _profiled_mp = "min_prominence" in _profiled
+    _profiled_ema = "ema_alpha" in _profiled
+    _profiled_pb = "pullback_weight" in _profiled
+    _profiled_bonus = "channel_peak_bonus" in _profiled
+    use_pos_bonus = _profiled_bonus and use_combined_channel_score
+
     sig_start, sig_end = detect_signal_region(baseline_subtracted)
     global_spacing = estimate_global_spacing(envelope, sig_start, sig_end)
     pos = sig_start
@@ -903,14 +942,44 @@ def track_bases(
         if lo > hi:
             break
 
-        window = envelope[lo:hi + 1]
+        if _profile_fracs is not None:
+            frac = pos / n
+            if _profiled_mp:
+                mp_eff = float(np.interp(frac, _profile_fracs, _profile_vals["min_prominence"]))
+            else:
+                mp_eff = min_prominence
+            if _profiled_ema:
+                ema_eff = float(np.interp(frac, _profile_fracs, _profile_vals["ema_alpha"]))
+            else:
+                ema_eff = ema_alpha
+            if _profiled_pb:
+                pb_eff = float(np.interp(frac, _profile_fracs, _profile_vals["pullback_weight"]))
+            else:
+                pb_eff = pullback_weight
+            if _profiled_bonus:
+                bonus_eff = float(np.interp(frac, _profile_fracs, _profile_vals["channel_peak_bonus"]))
+            else:
+                bonus_eff = channel_peak_bonus
+        else:
+            mp_eff, ema_eff, pb_eff = min_prominence, ema_alpha, pullback_weight
+            bonus_eff = channel_peak_bonus
+
+        if use_pos_bonus:
+            # Position-dependent channel bonus: the precomputed envelope used
+            # the scalar bonus, so re-derive it per-window with the effective
+            # value. Otherwise the fast precomputed path is byte-identical.
+            w_norm = norm_trace[lo:hi + 1]
+            w_boost = w_norm * (1.0 + channel_peak_mask[lo:hi + 1].astype(float) * bonus_eff)
+            window = w_boost.max(axis=1)
+        else:
+            window = envelope[lo:hi + 1]
         if len(window) == 0:
             break
         local_peak_offset = int(np.argmax(window))
         local_peak_pos = lo + local_peak_offset
         local_peak_val = window[local_peak_offset]
 
-        if local_peak_val < min_prominence:
+        if local_peak_val < mp_eff:
             # No credible peak in the expected window -- count a miss and
             # advance by the current spacing estimate anyway, so a few
             # consecutive weak/missed bases don't derail tracking entirely.
@@ -922,15 +991,18 @@ def track_bases(
 
         misses = 0
         observed_spacing = local_peak_pos - pos
-        spacing = (1 - ema_alpha) * spacing + ema_alpha * observed_spacing
+        spacing = (1 - ema_eff) * spacing + ema_eff * observed_spacing
         # Pull back toward the robust global estimate every step, so a
         # noisy local stretch can nudge the estimate but can't make it
         # drift away unboundedly -- it's always being tugged back toward
         # what the whole read's spacing actually looks like.
-        spacing = (1 - pullback_weight) * spacing + pullback_weight * global_spacing
+        spacing = (1 - pb_eff) * spacing + pb_eff * global_spacing
         spacing = float(np.clip(spacing, global_spacing * 0.5, global_spacing * 2.0))
 
-        ch = int(best_channel[local_peak_pos])
+        if use_pos_bonus:
+            ch = int(np.argmax(w_boost[local_peak_offset]))
+        else:
+            ch = int(best_channel[local_peak_pos])
         results.append(TrackedBase(
             position=local_peak_pos, channel=ch, height=float(local_peak_val),
             expected_position=expected_next, spacing_used=spacing,
