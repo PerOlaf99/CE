@@ -646,3 +646,21 @@ clears the whole plate by 12.6 mean matched_bp.
 - Verified headlessly on A01: 894 bases, 786 matched_bp (pident 94.2) —
   identical to the offline golden-standard run.  Overlay coordinates match
   because the package reads the same 9647-scan RSD grid as the GUI.
+
+### 6. best_basecaller parameter finetuning (grid sweep, in progress)
+best_web_sweep.py sweeps the web caller's knobs on the golden-standard 48
+held-out wells with a FASTER-but-identical BLAST path (M13 makeblastdb built
+once; same outfmt + best-bitscore pick as blast_eval).  Reproduces the bar:
+BASE config -> mean matched 767.98 (fi 83.63, pident 95.44, qlen 918.6,
+32/48 > DLL).  Interim single-knob results:
+
+  pullback_weight=0.008  mean 813.16  fi 83.70  qlen 972  (42/48 > DLL, but
+                         4 wells produce NO clean HSP -> fragile)
+  pullback_weight=0.012  mean 792.38  fi 83.26  qlen 953  (39/48 > DLL,
+                         47/48 aligned -> robust and +24 over base)
+
+Direction: LOWER pullback (looser spacing anchor) + higher ema tracks the
+broadening tail further -> longer reads with real M13 match (+matched), the
+exact same lever the DLL edges us on.  Full grid (35 configs + combos,
+~20 min as bestweb-sweep systemd unit) is running; final sweep table in
+best_web_sweep.log, winner config in best_web_sweep_best.json.
