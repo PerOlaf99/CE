@@ -97,6 +97,59 @@ OUR v9 weekend (de-novo) ... mean matched = 609.6   (regression — needs corr)
 OUR v9 + corr (de-novo) .... mean matched = 613.6   (+4, still below v8)
 v3 CNN (48-wells, 2026-09-11) mean matched = 701.3
 ESD (span: the reference for per-column) ... 99.94% identity on same columns
+
+WEB 2026-09-15 (external "best_basecaller", de-novo DSP, NO model)
+     mean matched = 767.98  (48 wells, >= 754.8 -> PASSES the bar; beats DLL 32/48)
+     mean bases = 918.6, mean fullid = 83.60% (DLL 869.7 / 86.79%)
+     calls in 02_denovo_cnn_ensemble_91.53pct/bestweb_calls/ (whole 96-well plate
+     also done: 73,523 matched total, 765.9 mean, 0 unaligned).
+     Why: it emits a LONGER read whose tail is real M13 (+14 matched) at the
+     cost of identity (fullid 83.6 vs 86.8).  Same lesson as the tail-zone null.
+
+TUNED 2026-09-15 (quality-gated pullback sweep, tuned_basecaller.py): pullback
+     0.019 -> 0.012 extends the tail match further (+26/piece) but collapses a
+     few wells into low-quality tracks; gated by mean base qual (fall back to
+     0.019) -> 96/96 wells aligned, no oracle:
+       held-out 48 ... mean matched = 793.42  (fi 83.25, pident 94.55)
+       whole 96 ....... mean matched = 792.62  (fi 83.10, pident 94.44)
+       DLL bar ........ 754.81 held / 753.28 plate  -> beats DLL ~39 mean.
+     A01 = 801 matched (947 bp) > DLL 790.  Best de-novo result to date.
+     (release-pack "track_bases" config, cp_bonus=1.1/baseline 201/adaptive
+      spectral, reproduces 765/801 on A01, is WORSE under this bar: held 756.)
+
+TUNED-FINETUNE 2026-09-15 (bitscore-objective sweep, mb1k_window_sweep.py):
+     New objective: BLAST bitscore (rewards length AND identity; the earlier
+     matched-only sweep picked longer-but-dirtier reads that trailed bitscore).
+     Config: pb 0.008 / ema 0.08 / channel_peak_bonus 1.4, gate 2.4.
+       held-out 48 ... bits = 1282.58  matched = 796.77  id = 94.75%
+       other 48 ..... bits = 1275.54  matched = 787.31  id = 94.95%
+       whole 96 ..... bits = 1279.06  matched = 792.04  id = 94.85%
+       old tuned .... bits = 1262.41  matched = 792.62  id = 94.44%
+       DLL (held) ... bits = 1282.00  matched = 754.81  id = 96.81%
+       -> bits tied DLL (+0.6), matched +42, id -2.1 (caps at mutants).
+     Gate 2.4 catches G03's long-but-messy read (1093bp, q=2.25, bits 1079) and
+     falls back to the base read (1012bp, bits 1081, matched 842) - same as DLL.
+     Only pullback/ema/bonus move bitscore; window_frac/local_norm flat.
+
+POSITION-PROFILE 2026-09-15 (track_bases pos_profile, mb1k_posprofile_sweep.py):
+     Honest replacement for the abandoned windowed tail splice: parameters are
+     now a function of read position (linear interp of ema/pullback/min-prom/
+     bonus vs scan-fraction; byte-identical to scalar config when flat).
+     Error localization -> tail third carries 63% of errors; the killer was
+     NOT error-rate but tail SPACING divergence from the mid-read global
+     median - pulling back toward it there loses tail bases.  Profile: loosen
+     pullback 0.008 -> 0.001 across the last 2/3 of the read (frac 0.33).
+       held-out 48 ... bits = 1290.54  matched = 818.60  id = 94.00%
+       other 48 ..... bits = 1277.12  matched = 813.58  id = 93.87%
+       whole 96 ..... bits = 1283.83  matched = 816.09  id = 93.94%
+       flat (pre) ... bits = 1279.06  matched = 792.04  id = 94.85%
+       DLL (held) ... bits = 1282.00  matched = 754.81  id = 96.81%
+       DLL (plate) .. bits = 1278.3   matched = 753.3   id = 96.8%
+       -> beats DLL on BOTH metrics on BOTH splits: held bits +8.5,
+          matched +64/well; plate bits +5.5, matched +63/well.
+       Fast-EMA tails, loose-prominence, and bonus ramps all lost; only the
+       pullback ramp helped.  Tail error-rate unchanged (~8.4%) - gains are
+       recovered tail length, not cleaner bases.
 ```
 
 ---

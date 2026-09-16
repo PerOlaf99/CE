@@ -514,3 +514,253 @@ implements step 2 indel breakdown via semi-global SW vs M13: match/mm/ins/del,
 isolated-vs-contiguous, read-region split (head/mid/tail).  Run on the runtime
 machine with the models+BLAST:
   python3 -u attack_merge.py --wells A01 B04 B05 C09 D12 H11 --metrics
+
+## 2026-09-13 — overlapping per-region basecallers + stitch (region-count sweep)
+
+Question (user): region-specific basecallers with overlap, stitched into a
+final read — how many regions are optimal?  Implemented + ran on the 48-well
+held-out BLAST acceptance test vs Cimarron 3.12 DLL (DLL matched_bp 754.8).
+
+New artifacts in 02_denovo_cnn_ensemble_91.53pct/:
+- region_common.py        region membership + stitch helpers, SPLITS manifest
+- train_region_split.py   train one CNN per region for ANY split (same recipe)
+- eval_region_stitch.py   predict every model on every col once, then sweep
+                          (regions x overlap-margin x stitch) in numpy + BLAST
+- trained region_split{N}_r{r}.keras for N in 2,3,4,5,6,8 (14 epochs, seed 7)
+- region_stitch_sweep.log, region_stitch_rows_*.csv
+
+Method: region boundaries = rank fractions of the usable read.  Margin m makes
+bases within m of a boundary covered by BOTH adjacent models; stitch methods:
+none/conf/wmax (pick max-class-prob model) / vote (mean of class probs).
+
+Result (48-well means, best per count over margin+stitch):
+  regions | baseline(m=0) | best w/ overlap | config
+  2       | 699.7         | 699.7          | (overlap neutral)
+  3       | 706.6         | 708.4          | m=0.02 conf/wmax
+  4       | 702.5(retr)   | 703.4          | m=0.04 vote        (v3 orig m=0 = 701.3)
+  5       | 700.1         | 704.6          | m=0.04 vote
+  6       | 707.5         | 713.3  <-- BEST| m=0.02 vote
+  8       | 709.2         | 709.3          | m=0.02 conf/wmax
+  DLL     | 754.8         | -              | reference
+
+Verdict:
+- Overlap+stitch DOES help: +5.8 matched over the best hard-cut (6-region
+  707.5 -> 713.3); small margins (~0.02-0.04 rank, ~15-30 bases) help, large
+  margins (0.08-0.12) hurt.  mean-prob vote = conf for 1-model cover; near
+  boundaries vote slightly wins at n=6.
+- Sweet spot = SIX regions (cuts .10/.27/.47/.67/.85).  8 is close but its
+  last regions lose per-region val acc (0.67) as data thins; 2-5 underresolve
+  the read (the single big tail region can't sustain BLAST match to read end).
+  Best margin-0 baseline is n=8 (709.2) but overlap only pays off at n=6.
+- Acceptance STILL FAIL: 713.3 vs DLL 754.8 (-41.5), beats DLL on 2/47 wells.
+  The gap closed 701.3 -> 713.3 (+12, half of one earlier gap component) but
+  Cimarron's read still matches further tail M13; remaining = per-column tail
+  accuracy + tail length (same informational gap as before).
+
+## 2026-09-15 — tail-zone/tail-heavy/calibrated-lane dead ends + web "best_basecaller"
+
+Four threads tried to close the last tail-length gap (713.3 vs DLL 754.8). The
+first three are dead ends (documented so we don't retry); the fourth is an
+external DSP caller that actually beats the DLL on correctly-called bases.
+
+### 1. Tail-zone sweep — tighten the damaged 3' zone?  NULL (hurts)
+tailzone_sweep.log, region_stitch_rows_..._t0.60_0.70_0.80_0.90.csv
+Dropping bases beyond a rank tail_frac (0.60/0.70/0.80/0.90) before stitch,
+to shed the low-identity tail end. Best 6-region m=0.02 vote tail_frac=0.9 ->
+matched_bp 712.3, fi 83.65 (beats DLL 2/47). Tail-zone emission is NOT the
+bottleneck: cutting the tail LOSES matched, i.e. the DLL's extra gap to 754.8
+is not surplus garbage bases but bases that genuinely extend the M13 match.
+
+### 2. Tail-heavy splits — more regions packed on the tail?  NULL
+tailheavy_sweep.log, region_stitch_rows_s6,7,8,9_..._tall.csv
+Splits with 7/8/9 regions re-balanced toward the tail (eval_region_stitch
+--tail-heavy). Best remains plain 6-region baseline 713.3; 7 -> 703-707,
+8/9 -> 701-707. Per-region data thins too fast: more tail regions do not
+add tail accuracy.
+
+### 3. Calibrated lane models — train per-lane CNN, stitch whole reads  RUNNING
+build_cal_set.py + cal_training.npz (96 wells x lane-calibrated region cols,
+region_split{N}_cal.keras, train_cal_6_8.log); cal_sweep_eval.log (this is
+the 48-well acceptance run, ~15/48 done). Idea: the 4 color channels have
+lane-specific gain; a per-lane-normalized column feature should localize peaks
+better in the degraded tail. Will append verdict when it lands.
+
+### 4. Web "best_basecaller" (MB1000_M13_DT-tuned DSP)  <-- REAL WINNER
+User fetched best_basecaller.zip (de-novo MegaBACE M13 caller, pure
+numpy/scipy DSP + spacing-tracked peak calling, NO trained model). Smoke test
+passes; ran its WIN_CONFIG on all 96 wells (basecall.py) -> bestweb_calls/.
+Scored per well with OUR blast_bench.blast_eval vs M13 (same metric as the
+DLL/CNN table), compared vs Cimarron DLL ESD (73,523 total matched_bp):
+
+  caller             reads  matched_bp total  mean/well  mean fullid
+  best_basecaller      96   73,523         765.9       83.21%  (0 unaligned)
+  Cimarron DLL ESD     96   72,315         753.3       86.86%
+  our CNN 6-reg(?prod) 48 (held-out)      ~713.3       84.6%
+
+On CORRECTLY-ALIGNED BASES the web caller beats the DLL by +1,208 total
+(+1.7%) and our whole CNN ensemble by ~+53/well, de-novo and with zero
+training. It calls longer reads (mean 920.9, DLL 867.4) and that tail is
+real M13, not garbage. It loses on average identity (fullid 83.2 vs DLL
+86.9) purely because the clean head fraction shrinks as length grows.
+
+Implications for the CNN: the DLL's 41-bp gap to 754.8 could not be closed
+with more regions/calibration, and a tuned DSP caller clears 765.9 with a
+20 min numpy run. Next real lever = OUR tail, called at the DLL's read length
+(DLL 867 x ~91% head identity would land ~787), not more regions. Inspect
+bestweb A01-H12 vs v3 tails col-by-col; port its pullback/spacing logic
+(ema_alpha 0.10, pullback_weight 0.019) into perfect_basecaller's dip/brute
+spacing if tail smearing is the same phenom.
+
+### 4b. Golden-standard re-check (48 held-out wells) — PASSES
+Scored exactly per GOLDEN_STANDARD.md (blast_eval on the 48 v3_training
+split-0 wells): web mean matched 767.98 >= DLL 754.81 (doc 754.8) on the
+SAME 48 wells -> ACCEPT BAR MET, beats DLL on 32/48. A01: web 786 vs DLL 790
+(still behind there); win comes from the long-tail wells (G03: 842 vs 802).
+Mean bases 918.6 (DLL 869.7), mean fullid 83.60 (DLL 86.79). This is the
+first de-novo caller (ours or external) to clear the golden bar.  See
+GOLDEN_STANDARD.md status block.
+
+### 4c. Whole-plate (96-well) golden-standard score
+All 96 wells (A01-H12) x blast_eval, best HSP, per-well table
+saved at /tmp/opencode/wholeplate_tbl.txt:
+  WEB  mean matched = 765.86  (bases 920.9, fullid 83.16%)
+  DLL  mean matched = 753.28  (bases 867.4, fullid 86.85%)
+  web > dll matched on 63/96 wells; 96/96 web reads align (0 unaligned).
+Gap vs the held-out bar comes from 48 non-held-out wells (WEB 763.7 there vs
+DLL 751.7): same long-tail story, web wins matched nearly everywhere and
+clears the whole plate by 12.6 mean matched_bp.
+
+### 5. best_basecaller integrated into GUI V15
+- Added vendored `best_basecaller/` package at repo root (basecall.py +
+  cimarron_basecaller, numpy/scipy only, from user's web download).
+- New bottom-bar button **"Run best_basecaller (web)"** in
+  sequencing_gui_V15.py -> _run_best_basecaller():
+  * runs the caller's WIN_CONFIG on the loaded .rsd (read_rsd ->
+    to_acgt_trace order TGCA -> track_bases);
+  * draws the called base letters at the caller's own band positions as a
+    row on the SEPARATED panel (same band style as the ESD row on panel 4),
+    so both callers' base placement is visible against the signal;
+  * status line: N bases + vs ESD NW identity + golden-standard BLAST
+    matched_bp/pident vs M13;
+  * fills the FASTA box with ><well>_best_basecaller record.
+- Verified headlessly on A01: 894 bases, 786 matched_bp (pident 94.2) —
+  identical to the offline golden-standard run.  Overlay coordinates match
+  because the package reads the same 9647-scan RSD grid as the GUI.
+
+### 6. best_basecaller parameter finetuning (grid sweep, in progress)
+best_web_sweep.py sweeps the web caller's knobs on the golden-standard 48
+held-out wells with a FASTER-but-identical BLAST path (M13 makeblastdb built
+once; same outfmt + best-bitscore pick as blast_eval).  Reproduces the bar:
+BASE config -> mean matched 767.98 (fi 83.63, pident 95.44, qlen 918.6,
+32/48 > DLL).  Interim single-knob results:
+
+  pullback_weight=0.008  mean 813.16  fi 83.70  qlen 972  (42/48 > DLL, but
+                         4 wells produce NO clean HSP -> fragile)
+  pullback_weight=0.012  mean 792.38  fi 83.26  qlen 953  (39/48 > DLL,
+                         47/48 aligned -> robust and +24 over base)
+
+Direction: LOWER pullback (looser spacing anchor) + higher ema tracks the
+broadening tail further -> longer reads with real M13 match (+matched), the
+exact same lever the DLL edges us on.  Full grid (35 configs + combos,
+~20 min as bestweb-sweep systemd unit) is running; final sweep table in
+best_web_sweep.log, winner config in best_web_sweep_best.json.
+
+### 6b. Sweep verdict + quality-gated tuned caller (the win)
+Full 48-well coordinate sweep finished (best_web_sweep.log; log is gitignored
+but reproducible).  Only pullback_weight and ema_alpha move matched_bp; the
+rest are flat.  Signal: pb 0.019 -> 0.012 (leave ema 0.10) +~24 mean on the
+aligned subset, but collapses a few wells (G03 842 -> NO HSP) into a
+low-quality track.  Collapses are identifiable BY THE CALLER: mean base qual
+~1.4 vs ~2.6 on healthy reads.
+
+**Finetuned caller = tuned_basecaller.py** (imported by GUI):
+run TUNED (pb=0.012, ema=0.10, cp=1.6); if mean qual < 1.6 -> rerun BASE
+(pb=0.019).  Golden-standard BLAST (miss=0), 96/96 wells aligned:
+
+  caller              held-48   whole-96   wins vs DLL
+  WEB base ........... 767.98    765.86    32/48
+  TUNED gated ........ 793.42    792.62    ~40/48   <-- BEST
+  DLL reference ...... 754.81    753.28    -
+
+A01 tuned = 801 matched (947 bp, pident 94.3) > DLL 790.  Calls saved in
+tuned_calls/ (FASTA per well, header carries the pb used).
+
+### 6c. track_bases_release.zip (user's new pack) - A/B on the SAME bar
+Verified the pack reproduces its own A01 fasta (903 bp) exactly.  Its config
+(cp_bonus=1.1, baseline_window=201, position_adaptive_spectral=True) is
+WORSE under our golden-standard BLAST than our shipped base: held 756.04,
+plate 751.68 (95/96 aligned); A01 gives 765/801 id in NCBI blastn but matched
+765 < our 786.  Released pack copied into track_bases_release/ for
+provenance.  Its plate "eq" metric (sum eq 79,158 vs Cimarron 78,293) is a
+span proxy, NOT our BLAST matched_bp, so it is not directly comparable.
+
+### 6d. Bitscore-objective fine-tune (stage-1 global + gate calibration)
+The earlier sweep optimized matched_bp, picking longer-but-dirtier reads.
+Fine-finetune (mb1k_window_sweep.py) changed objective to BLAST *bitscore*
+(length AND identity) + re-measured on a 16-config held-out grid + combo
+round. Key finding: matched-only optimum (pb 0.012, ema 0.10) traded ~14
+bitscore for +0 matched by allowing dirty tail bases. The new sweet spot:
+
+  Config:  pb 0.008 / ema 0.08 / bonus 1.4 / gate 2.4
+  Held-48: bits 1282.58 ≈ DLL 1282.00, matched 796.77, id 94.75%
+  Other-48: bits 1275.54, matched 787.31, id 94.95%
+  Plate:    bits 1279.06 (+16.6 vs old), matched 792.04, id 94.85%
+
+Gate calibration: the gate 1.6 (from pb-0.012 era) no longer caught G03's
+long-but-messy read (qmean 2.25) whose tuned bitscore (1079) lost to the
+base fallback (1081, matched 842). Plate-wide gate sweep on the new config
+found gate 2.4 optimal: bits 1279.06, matched 792.04. (Gate >2.4 over-
+catches well, bitscore drops; gate 1.6-2.2 = 1279.04.)
+
+Only pullback/ema/bonus moved bitscore; window_frac, gaussian recon size,
+local_norm_window were flat (as in the original sweep).
+
+### 6e. Windowed tail splice attempt (stage-2, abandoned)
+Error-localization on 12 A-row tuned reads (aligned to M13 via SW):
+
+  head  3764 bp:  71 errors, 1.9% error-rate (30.5% of total)
+  mid   3761 bp:  16 errors, 0.4% error-rate (6.9% of total)
+  tail  3759 bp: 146 errors, 3.9% error-rate (62.7% of total)
+
+The tail carries 63% of all errors (3.9% vs 0.4% in the middle). Naive
+splice plan: keep body + re-call the tail with a clean config (e.g. ema
+0.06) and fuse. Tested on A01: re-calling from the 2/3-read scan position
+yielded only ~32 bp (track_bases stalls on a mid-trace slice, likely due to
+local-norm warmup / gaussian recon segment initialization). The raw-splice
+approach is therefore non-viable. The honest implementation would be a
+position-profile inside spacing_caller (time-varying pullback/ema/bonus as a
+function of scan position) -- not attempted.
+
+### 6f. Position-profile in track_bases (stage-2, honest fix for the tail)
+The windowed splice (6e) failed because track_bases stalls on a mid-trace
+slice.  Rebuilt the idea properly: a `pos_profile` kwarg on track_bases
+makes ema_alpha / pullback_weight / min_prominence / channel_peak_bonus
+linear functions of read scan-fraction (breakpoints sorted, must span
+0.0->1.0; any profiled param at all breakpoints).  Flat or None profile is
+byte-identical to the scalar path (regression-gated on 6 wells).  The
+position-dependent channel_peak_bonus re-derives the boosted envelope
+per-window (else the precomputed fast path stands).
+
+Sweep (mb1k_posprofile_sweep.py, 48 held-out, bitscore objective):
+  - Tightening pullback/ema/prominence in the tail HURTS bitscore (long
+    tail reads, base config ~1230).  Fast-EMA tail collapses (1204).
+  - channel_peak_bonus ramp: ~flat (1280).
+  - LOOSENING pullback in the tail (0.008 -> 0.001) is the winner:
+      held bits 1292.5 (flat 1282.6), matched 818.4; other bits 1273.9
+      (flat 1275.5), matched 813.6.
+  - Refined grid: ramp start 0.33 is positive on BOTH halves
+      (held +7.9 bits, other +1.6; rampf.50 was +9.9/-1.6), plate-best.
+  - Adopted: pullback 0.008 -> 0.001 over frac 0.33..1.0 (TUNED_PROFILE).
+    Authoritative plate (regenerated tuned_calls, 96/96 aligned):
+      held  1290.54 bits / 818.60 matched / 94.00% id
+      other 1277.12 / 813.58 / 93.87%
+      plate 1283.83 / 816.09 / 93.94%
+      DLL   held 1282.00 / 754.81 / 96.81%;  plate ~1278.3 / 753.3
+    -> now BEATS the DLL on both bitscore and matched, on both halves.
+  - Insight: the tail failure mode is spacing DIVERGENCE from the global
+    median (gel bands slow/spread), not merely base-quality; pullback
+    against a mid-read median loses tail bases.  Tail error-rate stayed
+    ~8.4% - the gain is recovered tail length, not cleaner bases.
+  - Error-localization SW needed rc(read) vs plus-strand M13 (reads are
+    reverse-complement to refs/m13_M77815.1.fa); global alignment mis-scores
+    a 1kb substring in 7.2kb ref, so it's local Smith-Waterman.

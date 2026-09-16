@@ -1,0 +1,130 @@
+[
+ {
+  "name": "bonus 1.2",
+  "n": 48,
+  "bits": 1275.79,
+  "matched": 789.77,
+  "ident": 94.92,
+  "sec": 35.2
+ },
+ {
+  "name": "pb 0.008",
+  "n": 48,
+  "bits": 1273.06,
+  "matched": 810.1,
+  "ident": 93.97,
+  "sec": 36.5
+ },
+ {
+  "name": "pb.010 ema.08",
+  "n": 48,
+  "bits": 1269.83,
+  "matched": 779.88,
+  "ident": 95.13,
+  "sec": 34.5
+ },
+ {
+  "name": "pb.006",
+  "n": 48,
+  "bits": 1268.23,
+  "matched": 813.67,
+  "ident": 93.71,
+  "sec": 37.2
+ },
+ {
+  "name": "baseline tuned",
+  "n": 48,
+  "bits": 1267.88,
+  "matched": 793.42,
+  "ident": 94.55,
+  "sec": 34.7
+ },
+ {
+  "name": "pb.014 ema.12",
+  "n": 48,
+  "bits": 1267.83,
+  "matched": 802.77,
+  "ident": 94.18,
+  "sec": 35.9
+ },
+ {
+  "name": "pb 0.016",
+  "n": 48,
+  "bits": 1264.21,
+  "matched": 775.77,
+  "ident": 95.21,
+  "sec": 34.6
+ },
+ {
+  "name": "pb.008 bonus1.8",
+  "n": 48,
+  "bits": 1260.67,
+  "matched": 803.31,
+  "ident": 93.94,
+  "sec": 38.4
+ },
+ {
+  "name": "bonus 2.0",
+  "n": 46,
+  "bits": 1259.61,
+  "matched": 792.13,
+  "ident": 94.36,
+  "sec": 36.9
+ },
+ {
+  "name": "pb.004",
+  "n": 48,
+  "bits": 1258.94,
+  "matched": 811.67,
+  "ident": 93.61,
+  "sec": 37.7
+ },
+ {
+  "name": "pb.008 ema.06",
+  "n": 48,
+  "bits": 1256.54,
+  "matched": 763.1,
+  "ident": 95.55,
+  "sec": 34.5
+ },
+ {
+  "name": "pb 0.020",
+  "n": 48,
+  "bits": 1253.9,
+  "matched": 762.25,
+  "ident": 95.54,
+  "sec": 33.2
+ },
+ {
+  "name": "wfrac1.2 pb.008",
+  "n": 48,
+  "bits": 1251.48,
+  "matched": 782.83,
+  "ident": 94.55,
+  "sec": 48.1
+ },
+ {
+  "name": "ema 0.06",
+  "n": 48,
+  "bits": 1249.46,
+  "matched": 752.94,
+  "ident": 95.82,
+  "sec": 33.7
+ },
+ {
+  "name": "wfrac1.2",
+  "n": 48,
+  "bits": 1246.75,
+  "matched": 780.21,
+  "ident": 94.5,
+  "sec": 42.8
+ },
+ {
+  "name": "ema 0.14",
+  "n": 48,
+  "bits": 1244.54,
+  "matched": 814.06,
+  "ident": 93.23,
+  "sec": 38.0
+ }
+]
