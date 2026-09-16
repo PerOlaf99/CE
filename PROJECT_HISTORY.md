@@ -1591,3 +1591,374 @@ Three commits pushed by the user from home (origin/main d4e6396a):
 User's de-novo bar today = v4/v5 family (~86% plate NW vs ESD; M13 core ~99%).
 New to reconcile: user's v4/v5 begin+mid M13-anchored consensus ~99.2% identity,
 546 bp, bit 904, cov 90% (local blastn) vs the DLL 95.4% bar — the tail remains.
+
+----------------------------------------------------------------------
+## Session 2026-09-14 (afternoon): GUI greedy plate-wide test DECISIVE
+----------------------------------------------------------------------
+
+Decisive answer to "does A01's 12-band DSP generalize?" -- YES.
+
+`_plate_gui_greedy_blast.py`: ran the GUI V15 pure-Greedy caller (no ML) with
+the 12 A01 per-band JSONs on all 48 held-out (split=0) wells, BLAST each
+read vs M13 (golden-standard matched_bp, same pipeline as plate_blast.py).
+
+IMPORTANT bug in first batch: added esd_offset(+2008) to region spins
+(A01=653).  Raw r0 reproduces recorded 688 exactly -> raw r0 is correct and
+runs 2.5x faster (~4s/well).
+
+                mean    min    max
+  GUI greedy    666.4   611    713
+  DLL 3.12      754.8   726    802
+  v4/v6 ens     639.5   593    665
+
+- GUI greedy beats our entire CNN de-novo ensemble in 45/48 wells, generalizes
+  across the plate, ~200s plate runtime, zero ML.
+- Gap to DLL = 88.4 matched, now a LABEL gap not a position gap (greedy is at
+  98.09% ESD identity = the per-band DSP greedy label ceiling).
+
+Next lever: retrain per-region CNN on GUI DSP-lane windows (dsp_full_pipeline
+with per-band settings), not cache_sep, to close input-domain mismatch
+(CNN 90.6% vs greedy 94.3% at same GUI positions, _cnn_at_gui_pos.py).
+
+------------------------------------------------------------------------------
+## Session 2026-09-14: v10 retrain-on-GUI-lanes -> NEGATIVE (decisive)
+------------------------------------------------------------------------------
+
+Retrained per-region CNNs on the GUI's OWN per-band DSP lanes (shifted, the
+exact lanes pc_call_bases_greedy labels from), at GUI greedy positions,
+labelled by ESD.  Goal: close the _cnn_at_gui_pos input-domain mismatch
+(old CNN cache_sep 90.6% vs greedy 94.3% at same positions).
+
+Build/scripts:
+  sanger_toolkit/_build_gui_lane_set.py   -> gui_lane_r{r}.npz (r2..r7)
+  sanger_toolkit/_plate_gui_greedy_blast.py (raw r0 spins, 12-band stitch)
+  02_.../train_gui_lane.py                -> base_caller_model_v10_r{r}.keras
+  02_.../eval_gui_lane.py                 -> GUI positions relabelled by v10
+
+GUI greedy positions only exist for scan-fraction regions 2..7 (signal starts
+~scan 2050), so r0/r1 have no samples.
+
+v10 per-region val acc: r2=0.760 r3=0.914 r4=0.807 r5=0.810 r6=0.757 r7=0.606
+(data volume ~15.7k/14.8k/14.0k/15.9k/10.7k/6.6k; 48/48 well split).
+
+FULL 48-HELD-OUT BLAST (matched_bp, golden standard):
+  v10 relabel    mean 616.7   (beats greedy in 0/47 wells, delta -50.8, worst -98)
+  GUI greedy     mean 666.4
+  DLL 3.12       mean 754.8
+
+VERDICT: even trained on the GUI's own DSP lanes, the CNN at GUI positions
+LOSES to the greedy argmax labeler in every well.  Greedy-at-GUI IS the
+label ceiling for these positions.  v10 val acc ~0.76-0.91 == greedy's
+per-region acc already built in; a 4-class CNN cannot beat the exact-scan
+argmax the greedy uses.  The ~88 matched gap to DLL is therefore NOT a
+label problem at GUI positions -- it is POSITION COVERAGE/GATING: GUI detects
+~826 bases but only 666 match (full-ident ~81%), DLL detects ~755 with
+~99.9% full-ident.  Known fix: hybrid positions (dll_peaks better in r3-r6
+mid, GUI grid tight at r2/r7) + the fuzzy/BandStat post-classifier gate.
+
+------------------------------------------------------------------------------
+## Session 2026-09-14: fuzzy/BandStat gate -> NEGATIVE (exhausted)
+------------------------------------------------------------------------------
+
+Asked: "gate + retrain (option A) vs gate-only (option 2)".  Chose option 2:
+apply the fuzzy/BandStat gate (FUN_10012140 port, classify_fuzzy.py) on top of
+greedy calls to drop/relabel un-matchable columns before BLAST.
+
+Findings on A01 (GUI greedy ref: len=811 matched=688 fullid=84.8):
+
+1) scale fix for Phase-C blocker: raw features (sb/env 0.24-4.8 vs floor
+   0.05*1.24) collapse q to 2.25-2.61 (all weak).  envelope*0.11 spreads q
+   over [1.00,2.61] and gives val/qual AUC ~0.8 (good cols 2.35 vs bad 1.71).
+
+2) gate-drop (emit iff q<=thr, scale 0.11): EVERY threshold STRICTLY LOSES
+   matched (thr=1.0: keep 117 dropped -> matched 560, -128; thr=2.4 -> -246).
+   The weak columns include matched bases; interior deletion fragments the
+   read into sub-30/less-total HSPs -> matched collapses.
+
+3) gate-tail-trim (trim after last strong col): no-op at all thresholds.
+   The 123 mismatches are INTERIOR, not tail.
+
+4) gate-relabel with v10 CNN where q<=thr: 0 switches (CNN v10 agrees with
+   greedy 100% on every weak column).  weak-corr 0.78 vs good-corr 0.97 --
+   the bad cols are bad to EVERYONE (greedy, CNN, 2nd-channel picks 2nd
+   base only 0.44).
+
+5) gate-relabel to 'N' wildcard at weak cols: -313 (megablast uses N to break
+   alignment, worse than deleting).
+
+6) DLL-path test (apply gate on over-detected candidate set, 1473 peaks):
+   q=1 (keep) selects 758 peaks but ESD recall only 0.25/vs 0.80 for the
+   env-floor+region-window gates.  In the DLL the fuzzy classifier is NOT the
+   position-set gate -- FUN_10019ef2 (env floor + longest-signal-region) is.
+
+7) decomp confirms: FUN_10012140 return is consumed ONLY in basecall loop
+   (decomp_all.c:13913-13948) as 1=keep, 2=weak(emit, mark posflag 5 iff
+   D_Y <= 0x10038a80~1.176471).  It NEVER modifies the emitted sequence.
+   posflag only adds a quality mark to display/annotate.
+
+VERDICT: the fuzzy/BandStat classifier correctly SCORES bad columns (AUC~0.8)
+but there is no application that improves BLAST matched:
+  - dropping fragments contiguity (negative),
+  - relabeling fails (CNN agrees, 2nd/best-channel wrong),
+  - the DLL itself never uses q to drop/relabel -- it is emit-with-mark only.
+The gate LVL is closed.  The ~88 gap is POSITION coverage (GUI 826 detected /
+666 match; DLL 755 detected near-100% match), which the fuzzy gate does not
+touch.  Remaining lever: hybrid positions (dll_peaks in r3-r6 + GUI grid r2/r7).
+
+------------------------------------------------------------------------------
+## Session 2026-09-14: REMAINING LEVERS (what is left)
+------------------------------------------------------------------------------
+From v10 + gate closure, matched_bp = detected_bp * full-ident,
+  GUI: 826 * 0.81 = 666  |  DLL: 755 * ~1.00 = 755.
+The only variables left are POSITIONS (which scans get called) and the COVERAGE
+vs PRECISION tradeoff.  Options, in order of expected leverage:
+
+  A) HYBRID MISSIONS (dll_peaks + GUI grid): already validated dll_peaks
+     recall 0.80/well vs GUI 12-band grid; merge r3-r6 dll (mid, tight) with
+     r2/r7 GUI (tail/head, over-detected by dll).  Label with greedy.  BLAST.
+  B) STOP-8 tail / r7 end-of-read gating (DLL does not call the very last
+     weak bands; GUI r7 dense grid over-calls the run-off tail).
+--------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+## Session 2026-09-14: post-detection gates RE-tested -> all NEGATIVE (levers closed)
+------------------------------------------------------------------------------
+
+Re-tested every remaining post-detection lever suggested (classic 4-step:
+baseline->smooth->normalize->per-channel detekt->shift->matrix-veto / hybrid
+positions / position union).  All fail on the golden BLAST metric:
+
+1) PER-CHANNEL find_peaks + tol-merge (multiview path), labeled argmax, A01:
+   best n=686 matched=557 vs greedy-at-GUI 692.  Per-channel LOSES everywhere.
+
+2) MATRIX-BLED VETO (use crosstalk matrix to drop peaks explainable as bleed
+   from a stronger neighbor channel): NO-OP at every (d, prom) sweep -- same
+   counts with/without.  Cause: dsp_separate_channels ALREADY applies the
+   matrix overlap removal before detection (raw @ inv(matrix), dsp.py:451), so
+   post-matrix peaks are real multi-base clusters, not bleed shoulders.  The
+   "auto matrix overlap remove" step is already in the pipeline.
+
+3) HYBRID POSITIONS (dll_peaks r3-r6 + GUI grid r2/r7), 8-well probe:
+   premise is FALSE.  GUI grid already recovers ~96% of true ESD positions
+   (A01 810/841; junk=1), and BEATS dll_peaks in r5/r6 decisively in every
+   well (GUI r5 ~165 vs DLL ~126; r6 ~112 vs ~75); DLL only wins r3 marginally
+   and carries junk in r7.  dll_peaks is a WORSE position source than the GUI
+   grid for M13 truth.
+
+4) POSITION UNION (GUI grid U dll_peaks, dedupe by tol): A01 tol=3 adds 884
+   ESD-hits (more than 841 true) but BLAST matched only 699 (+7) with full-id
+   collapsing 85->77%.  MORE correct positions WITHOUT correct labels do NOT
+   convert to matched bp.
+
+ROOT: GUI has the positions already; it is the per-base LABEL (full-ident
+85% vs DLL ~100%) that caps matched=811*0.85=692 vs DLL 755*1.00=755.
+Greedy/argmax/CNN(v10) labelers all exhausted at GUI positions.  The only
+un-exhausted lever: the DLL's OWN per-base letter logic (BandStat -> Q/letter
+inside FUN_1001dee1 / FUN_1001bb60, downstream of fuzzy marks + NTU/overlap
+graph) -- everything so far reuses OUR labeler on various position sets.
+--------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------
+## Session 2026-09-14 (decomp lab): DLL base-label path FULLY DECODED
+##  -> the "un-exhausted lever" is CLOSED: labels ARE a dominant-channel argmax
+##  -> the real remaining lever is POSITION QUALITY (FUN_10019280 snap)
+-----------------------------------------------------------------------------
+
+Decided next lever was "the DLL's own per-base letter logic".  Traced the
+emission path in `02_denovo_cnn_ensemble_91.53pct/re_artifacts/decomp_all.c`.
+Upshot: the DLL's emitted letter is **`param_1[dominant_channel(scan)]`** —
+dominant channel at the band's scan, mapped through the dye-order string.
+There is NO separate "Q -> letter" remap anywhere; the fuzzy classifier
+(FUN_10012140) only ever decides emit-vs-skip (+ a posflag quality mark),
+never the base identity.  What we have NOT ported is the DLL's final
+**position massager** `FUN_10019280` (outlier trim + quadratic snap + monotonic
+clamp) — that is the piece whose absence makes positions 1-3 scans off-axis
+and therefore mis-labels every gap column.
+
+### A. The emission path (orchestration fn, decomp lines 13690-14364)
+Inputs: `this` = call:: object (Wvfm* at +8, BandStatArray rows at +0x1c
+(0x14 bytes each), letter array at +0xa01c), `param_1` = dye-order base string
+("TGCA..." such that `param_1[-1 + ch]` is the base letter), `param_3` = raw RSD.
+
+  1. `FUN_1002511d(this, param_3, local_88)` @13713 — env-maxima band detector
+     (+ FUN_10024f29 width filter 13318).  THIS IS what we already ported as
+     `dll_peakdet.dll_peaks`.  Output = candidate BandStatArray `local_88`.
+  2. Low-signal-region trim @13715-13785: keep only contiguous run of bands
+     whose envv > `_DAT_10038a88` with 10-band quiet tolerance (the
+     bgn/end region gate).
+  3. `local_20 = getCFlen(local_88)`; alloc `local_24 = ivector(1,local_20)`.
+  4. `FUN_10019280(NumCurrFix, SWold, local_24, local_20)` @13803
+     = **the final POSITION array** (see C).
+  5. `local_34 = FUN_10024e47(this, local_88)` @13805 — per-band aux array
+     (strength/quality bookkeeping; consumed by fuzzy at step 7).
+  6. `local_28 = ivector(1, Wvfm::rows)` @13818 — per-scan dominant-channel
+     lookup table, filled by `FUN_10025431` @13831 (see B).
+  7. Per-band envelopes: `local_38[i] = envv(bandpos)` @13860-13863;
+     `local_2c[i] = min(envv(left), envv(right))` @13880-13892.
+  8. `FUN_10012140(local_24, local_38, local_2c, SWold, NumCurrFix, local_34,
+     local_20, matrix)` @13913 — the FUZZY classifier.  Return per-band
+     q (ftol): q==1 KEEP, q==2 weak-EMIT, else skip.  For q==2 and
+     `local_34[band] <= _DAT_10038a80 (~1.176471)` set posflag=5
+     (only a quality mark; sequence never changes) — matches the earlier
+     FIND_10012140/gate closure (13941-13944).
+  9. **Emission loop @13923-13948** (first/region-pass, and the same pattern
+     at 14281-14305 for the annotate pass):
+     ```
+     if ftol()==1:           # KEEP
+       copy band record -> this + local_18*0x14 + 0x1c
+       ch_scan = FUN_1001bb80(local_88, band)   # band position (scan)
+       ch = Wvfm::envi(wvfm, ch_scan)           # dominant channel index
+       letter = param_1[-1 + ch]                # 13935-13938
+       BandStatArray::call -> this + 0xa01c     # stored per band
+     elif ftol()==2:         # weak: emit but maybe N
+       if local_34[band] <= _DAT_10038a80: local_28[ch_scan] = 5   # '?'/N
+       goto LAB_1001aab0 (same emit body)
+     ```
+     FUN_1001dee1 (header-def @15526) is ONLY the BandStatArray::call setter
+     (copies a pre-made char array `param_3` into each band's 0x34 field).
+     The letters fed to it at 19344 (`piVar3`) are the candidate MINIMA list,
+     NOT bases — the false lead from the first pass.  BandStatStruct: 0x50
+     bytes; call @+0x34, iubc @+0x35.
+ 10. `FUN_1001e34e(...)` (OKN omit pass) @13968/14027, then optional second
+     region; `FUN_1002552a` @14332 assembles the export BandStatArray and the
+     annotate pass re-writes letters @14295-14296 from the same `local_28`
+     vote table (`param_1[-1 + local_28[pos]]`).
+
+**So "the DLL letter logic" == dominant-channel-argmax.**  Our `argmax` test
+at GUI positions (692 matched) is already the DLL's labeling rule; greedy's
+letter comes from the same per-scan channel-peak rule (`pc_call_bases_greedy`
+peaks on the normalized combined envelope, argmax channel wins the tie).
+
+### B. FUN_10025431 (per-scan dominant-channel vote) @19357
+For each scan `c` from `ShftVect::maxshft + 2` up to param_1:
+  `dVar3 = envv(c) * _DAT_10038d70`
+  walk channels 1..N: first channel with `sc_la(c,ch) >= dVar3` wins
+  (`local_14`: 0=none yet / stores first ch / 5 = exceeded none in first
+  5 channels -> unknown).  `param_2[c] = local_14`.
+So `local_28[scan]` = first separated-lane channel that clears an
+envelope-scaled threshold (5 = "none/faint").  This is the pre-computed
+scan->letter table; the emission loop just indexes it (or calls `Wvfm::envi`
+which returns the same thing).  Threshold constant `_DAT_10038d70` is the
+dial between "no call" and "always first channel" — the true analog of our
+prominence/argmax.
+
+### C. FUN_10019280 (final position massager) @13248 — NOT YET PORTED
+`FUN_10019280(param_1, param_2, param_3, param_4)`, param_1 = curr-fix
+positions, param_2 = SWold trend array, param_3 = NEW guaranteed-clean
+position array, param_4 = count.  Steps (all constants below):
+  1. mean `local_54` + std of param_2[1..param_4] (via locals; guard
+     std != `_DAT_10038a98`).
+  2. Z-score outlier trim (@13297): keep pair i iff
+     `|(param_2[i]-mean)/std| <= _DAT_10038aa0`, into parallel arrays
+     (piVar3=param_1 side, param_3=param_2 side).
+  3. `iquadratic(piVar3, param_3, n_kept, coeffs)` — quadratic fit of
+     position vs index; coeffs in local_28[0..2]; per-band dVar5=sqrt(local_1c).
+  4. Re-snap loop @13313: `param_3[i]=ftol(fit(param_1[i]))`; keep only the
+     i with `|snapped - raw| < dVar5`; if >3 kept, refit once and snap all.
+  5. Boundary/monotonicity @13336-13352: only if `local_20 != _DAT_10038a98`
+     and snapped median lands inside [param_1[1], param_1[param_4]]; then
+     clamp the tail/head runs to a constant (`_DAT_10038ab8` decides which end:
+     |slope| <= _DAT_10038ab8 -> pad constant forward).
+  6. Final floor @13353-13371: positions < 1 are pushed to the chain's min.
+  Net effect: **snap each base onto a smooth quadratic trend, drop wild
+  spacings, force monotone-increasing scan positions.**  THIS is the last
+  piece of the DLL's position precision (their 755 near-100% labels) that
+  GUI's raw grid (1-3 scans off-axis -> argmax mislabels) lacks.
+
+### D. Constants map (decomp `_DAT_100xx` globals, .text/.rdata)
+  - `_DAT_10038a88`  env floor / SNR threshold for the signal-region gate
+  - `_DAT_10038a80`  fuzzy weak mark bound ~1.176471 (D_Y ratio)
+  - `_DAT_10038aa0`  FUN_10019280 Z-score trim (outlier spacing cutoff)
+  - `_DAT_10038ab8`  FUN_10019280 slope/mono pad decision bound
+  - `_DAT_10038a98`  float-zero guarded compare sentinel (0.0-ish)
+  - `_DAT_10038d70`  FUN_10025431 env-threshold multiplier (vote sensitivity)
+  - `_DAT_10038d60/78/80/88`  gaussian-fit constants in FUN_1002552a
+  - `_DAT_10038ac0/ac8/ab0`  FUN_100197cf center-of-mass weighting
+  - `_DAT_100423f0`  = pi (acos(-1))
+Exact numeric values live in the DLL's data section (not written to the
+decomp text); recover via a DataView on csibq153.dll if ever needed.
+
+### E. Implication / next experiment
+`ARGMAX-AT-SNAPPED-POSITIONS` is the untested combination:
+  take GUI greedy positions -> apply the FUN_10019280 recipe (quadratic-trend
+  snap with _DAT_10038aa0-style trim + monotonic clamp) -> re-label each
+  snapped scan by dominant channel -> BLAST vs the 692 baseline.
+If snap fixes the ~6% of off-axis columns that are currently mislabeled, the
+read should approach DLL's matched.  (Alternative cheap probe: label at
+`Wvfm::envi`==first-sc_la>=env*thr with thr swept, on GUI grid, to verify the
+5=unknown/N semantics vs pure argmax.)  After that, the label lever is truly
+FAIR (both sides argmax) and the only remaining DLL assets are raw position
+micro-precision + tail density — both covered by the FUN_10019280 snap test.
+--------------------------------------------------------------------------------
+## Session 2026-09-14 (continued): DLL getPeakPosn probe + peaktrace.com + POSITION CEILING MEASURED
+
+### 1. Extractive mining: peaktrace.com (Nucleics)
+- Full page/whitepaper/FAQ/overview read. CLOSED SOURCE - no code. FAQ explicitly:
+  "the algorithms used are trade secrets". Only reusable nuggets:
+  - PeakTrace supports **MegaBACE** (BigDye3, ET Terminator, ET Primer) = our run chemistry.
+  - Their pitch = "KB-style RAW trace reprocessing, not processed-peak basecalling" -
+    identical design to what we decoded in csibq030012.dll (raw RSD -> sep -> detect -> snap).
+  - Read <500 bases = "no improvement possible over KB" - confirms the long-tail region is where positions matter.
+- Open-source finds (useful for ideas only, ABI .ab1/.scf != our RSD):
+  - gear-genomics/tracy (BSD, C++): Sanger basecalling + **peak deconvolution** of the overlapping tail.
+  - sangerseqR (GPL, R): makeBaseCalls ratio-window argmax = same family as GUI greedy.
+
+### 2. POSITION-CEILING EXPERIMENT (A01, one run, CHEAP => DECISIVE)
+- Frame discovery: ESD/DLL positions live in the **UNSHIFTED** separated-lane frame.
+  - argmax @ESD-pos on GUI **shifted** lanes = 86.2% cols (frame mismatch, WRONG).
+  - argmax @ESD-pos on `cache_sep` lanes = **95.4%** cols (reproduces prior session's 95.4%).
+  - argmax @ESD-pos on Z-scored `cache_sep` = **96.1% cols / BLAST matched=765 / fullid 91.0%**.
+- Dye order brute-forced = **'TGCA'** (channel->base). Confirmed by the DLL itself: AutoBaseCall prints "Using base order TGCA".
+- GUI grid vs ESD grid (A01, 12 bands):
+  - 811 GUI cols, 99.9% within 6 scans of an ESD peak.
+  - |off| mean 1.82 scans; p(==0)=10.6%, p(==1)=35.9%, p(==2)=29.8%, p(>2)=23.7%.
+  - signed offset mode: +1 (255 cols) +2 (217) -> GUI systematically LAGS by ~+1.5 scans.
+- Meaning: labels are NOT the limit; position precision is worth ~+77 matched (688->765),
+  and DLL's own read (790) beats even oracle-position argmax (765) -> DLL = better lanes too.
+- **Lever CLOSED (its value measured):** argmax@perfect-positions ceiling = 765 (A01); to approach
+  DLL means (754.8) we must fix positions on GUI grid, not oracle (oracle is info-theoretic ceiling for pure argmax).
+
+### 3. DLL getPeakPosn direct probe (per user request)
+- Full CSIBQWrap export surface dumped from csibq030012.dll (objdump), exact mangled names:
+  - ctor `??0CSIBQWrap@@QAE@HW4PHYSDATA@0@@Z`; setTrace `?setTrace@CSIBQWrap@@QAEHQAUCSIDataRow@@H@Z`;
+    setTestOptions `?setTestOptions@CSIBQWrap@@QAEXUTestOptions@@@Z` (BY VALUE struct, MSVC thiscall);
+    doBaseCalling `?doBaseCalling@CSIBQWrap@@QAEHXZ`; getPeakPosn `?getPeakPosn@CSIBQWrap@@QAEPBHXZ`;
+    getQualVec `?getQualVec@CSIBQWrap@@QAEPBMXZ`; getSequence `?getSequence@CSIBQWrap@@QAEPBDXZ`;
+    getIUBValues `?getIUBValues@CSIBQWrap@@QAEPBUCSIDataRow@@XZ`; getIUBCodes; getNumBases;
+    Annotate: getSpecSepMtrx/getSpecSepClue/getCurrFix/getNumCurrFix/getMobTblEntry/getMobTblLen/
+    getFwhmGapBp/getCurrent/getDecimData.
+- Wine harness VALIDATED: ran real AutoBaseCall.exe + CimBC030012_noPuff.dll (Cimarron 3.12) on A01.rsd.
+  - Prints "Using base order TGCA" - dye order confirmed by the binary itself.
+  - Fresh .esd == golden .esd for SEQUENCE, PEAK POSITIONS, QUALITY SCORES (all len 841, MATCH). 
+  => The golden ESDs ARE the exported getters' outputs; no per-well probe needed for pos/qual/seq.
+- NOT in ESD (need direct call, requires i686 mingw __thiscall or DLL patch): getIUBValues (secondary/IUB
+  calls), getSpecSepMtrx (per-band 4x4), getCurrFix (aligned pos), getMobTblEntry. Marginal vs decomp knowl-
+  edge already in-hand; skip unless a need appears.
+
+### 4. Next move (REVISED - pursue the measured position lever, not more probing)
+Run deterministic **position snap on GUI grid**:
+  for each band: Z-score the 4 separated lanes, snap each GUI position to the max of the
+  per-scan max over rolling +/-3 window (nearest local peak-sum), argmax-label, BLAST A01.
+  Expectation per data above: p(off==0)=10.6% stay; the 89% one-scan-off columns partially recover ->
+  ~688 -> target 740+. If positive, apply same snap + FUN_10019280-style monotonic clamp across the
+  48 held-out wells and compare vs DLL mean 754.8.
+--------------------------------------------------------------------------------
+## Session 2026-09-14 (continued): A01 position-snap test = NEGATIVE (lever CLOSED)
+- Tested deterministic position-snap on GUI grid, 3 variants, all BLAST-scored on A01:
+  - argmax @ GUI-pos (shifted-frame z-lanes, full-frame) = 703 matched / 95.9% col-acc  <- best GUI-grid read
+  - argmax @ GUI-pos (cache_sep/DLL-frame)                  = 688 matched / ~96% col-acc
+  - snap to local peak (naive +-3 max-profile, cache_sep)   = 645 matched, col-acc 96.2% (per-col UP, matched DOWN)
+  - snap + monotonic clamp (no-dups)                        = 649 matched
+  - FUN_10019280-style quad-trend snap + clamp              = NO alignment (fragmented)
+  - CEILING argmax @ ESD-pos (cache_sep, z)                 = 765 matched / 96.1% col-acc / len 841
+- Cause: snapping is ORDER-DESTRUCTIVE (dups/skips -> indels). Per-column +1% is swamped by indel
+  penalties; can't reach 765 by position fixing on the 811-col GUI grid.
+- Decomposition of the 688-vs-765 gap (GUI grid vs ceiling):
+  * +30 tail bases (841 vs 811) - GUI grid simply stops ~30 bases early.
+  * remaining delta = ordering/density quality on the existing 811 cols (both frames).
+- CONCLUSION: position-snap lever CLOSED. Remaining realistic levers now: (1) TAIL DENSITY (recover
+  the ~30 late bases past scan ~8600-9332, deconvolution/spec-sep quality), (2) DLL-frame lane quality
+  (build the whole pipeline on cache_sep-frame lanes to match the 765 ceiling condition), (3) optional
+  learned GUI->ESD-frame position regression trained on the 40 TRAIN wells (denovo, non-oracle) - the one
+  un-tried de-novo path; low expectation given snap hurt even order-preserving.
+--------------------------------------------------------------------------------

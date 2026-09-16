@@ -490,15 +490,16 @@ def dll_multi_pass(
         # EMA of spacing curve for head/middle baseline
         ema_sp = _ema_spacing(sp_curve, alpha)
 
-        # Pull-back: adjust the target for next pass (if more passes remain)
-        if pass_num < passes:
-            # pback fraction of the difference between current EMA and tgt
-            if len(ema_sp) > 0 and np.isfinite(ema_sp).sum() > 0:
-                ema_mean = float(np.mean(ema_sp))
-                tgt = tgt + pback * (ema_mean - tgt)
+        # Pull-back: adjust the target for the NEXT pass with the current-pass
+        # EMA spacing mean as feedback.
+        tgt_next = tgt_pass
+        if pass_num < passes and len(ema_sp) > 0 and np.isfinite(ema_sp).any():
+            ema_mean = float(np.mean(ema_sp[~np.isnan(ema_sp)]))
+            tgt_next = tgt_pass + pback * (ema_mean - tgt_pass)
+        tgt = tgt_next
 
         metrics[f"pass{pass_num}_n"] = len(scans)
-        metrics[f"pass{pass_tgt}_tgt"] = tgt_pass
+        metrics[f"pass{pass_num}_tgt"] = tgt_pass
         metrics[f"pass{pass_num}_ema_mean"] = float(np.mean(ema_sp)) if len(ema_sp) else 0.0
 
         current_scans = scans

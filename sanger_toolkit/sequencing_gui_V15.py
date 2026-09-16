@@ -9,6 +9,7 @@ import sys, os, struct, json, subprocess, tempfile
 import numpy as np
 
 import multiview_peakdetect as mvpd
+import dll_tail
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -187,18 +188,60 @@ class ReferenceDialog(QDialog):
         ref_slice = ref[lo - 1:hi]
 
         esd_seq = gui.esd_data.get('sequence', '')
-        # Use the caller shown in the plot (tolerance + fill-in knobs), not
-        # the old standalone pc_call_bases path. _update_plot refreshes it
-        # synchronously so the comparison always matches what is on screen.
-        gui._update_plot()
+        # Use the improved full basecall (incl. DLL-tail recovery); _run_basecall
+        # refreshs _manual_sequence + _last_positions synchronously so the
+        # comparison always matches the sequence the user sees / exports.
+        gui._run_basecall()
         ind_seq = gui._manual_sequence or ''
         if not ind_seq:
             gui._run_independent_peakcall()
             ind_seq = gui._independent_seq or ''
 
+        # Scope the comparison to the currently set region (scan window) so
+        # one can tune a single window to high identity. When the GUI region
+        # spin range is non-trivial, restrict each caller's sequence to the
+        # bases whose positions fall inside that window; otherwise the whole
+        # read is used.
+        window = None
+        try:
+            r0 = int(gui.region_start_spin.value())
+            r1 = int(gui.region_stop_spin.value())
+            if r1 > r0:
+                window = (r0, r1)
+        except AttributeError:
+            pass
+
+        def _scoped(seq, positions):
+            """Return (scoped_seq, dropped_before, dropped_after) or
+            (seq, 0, 0) when no window / no positions available."""
+            if window is None or not seq or positions is None:
+                return seq, 0, 0
+            pos = np.asarray(positions, dtype=np.int64)
+            n = min(len(seq), len(pos))
+            if n == 0:
+                return seq, 0, 0
+            keep = (pos[:n] >= window[0]) & (pos[:n] <= window[1])
+            scoped = ''.join(seq[i] for i in range(n) if keep[i])
+            return (scoped,
+                    int(np.count_nonzero(pos[:n] < window[0])),
+                    int(np.count_nonzero(pos[:n] > window[1])))
+
+        esd_pos = (gui.esd_data.get('peak_positions')
+                   if gui.esd_data is not None else None)
+        if esd_pos is None:
+            esd_pos = (gui.esd_data.get('bases_positions')
+                       if gui.esd_data is not None else None)
+        ind_pos = getattr(gui, '_last_positions', None)
+        esd_seq, esd_drop_b, esd_drop_a = _scoped(esd_seq, esd_pos)
+        ind_seq, ind_drop_b, ind_drop_a = _scoped(ind_seq, ind_pos)
+        scope_note = (f' (window {window[0]}..{window[1]})' if window
+                      else ' (whole read)')
+
         detail_lines = []
-        for label, seq, box in (('ESD', esd_seq, self.esd_result),
-                                ('Independent', ind_seq, self.ind_result)):
+        for label, seq, box, db, da in (
+                ('ESD', esd_seq, self.esd_result, esd_drop_b, esd_drop_a),
+                ('Independent', ind_seq, self.ind_result,
+                 ind_drop_b, ind_drop_a)):
             if not seq:
                 box.setText(f'{label} vs reference: no sequence')
                 continue
@@ -211,12 +254,14 @@ class ReferenceDialog(QDialog):
             drop_start = qlo
             drop_end = max(0, len(seq) - 1 - qhi)
             box.setText(
-                f'{label} vs reference (BLAST local): {ident:.1f}%\n'
+                f'{label} vs reference (BLAST local){scope_note}: '
+                f'{ident:.1f}%\n'
                 f'  {mm} matches, {mmis} mismatch, {ind} indel '
                 f'= {errors} errors ({aligned} bases aligned)\n'
                 f'  {orient} read · best segment ref {lo + rlo}..{lo + rhi}\n'
                 f'  {drop_start} bp dropped at read start, '
-                f'{drop_end} at read end')
+                f'{drop_end} at read end '
+                f'(+{db} pre-window, +{da} post-window)')
             detail_lines.append(f'--- {label} error decomposition ---')
             detail_lines.append(f'  Identity: {ident:.2f}%  ({mm}/{aligned} matches)')
             detail_lines.append(f'  Mismatches: {mmis}  Indels: {ind}')
@@ -701,6 +746,11 @@ class SequencingGUI(QMainWindow):
         self.rsd_raw = None
         self.esd_data = None
         self.esd_traces = None
+        self.dll_tail_enabled = True
+        self.dll_tail_split = 6000
+        self.dll_tail_min_sep = 4
+        self.dll_tail_snap_r = 2
+        self.dll_tail_apply_snap = False
         self.reference_name = 'M13 M77815.1'
         self.reference_dna = ''
         self.reference_start = 5300
@@ -1937,6 +1987,44 @@ class SequencingGUI(QMainWindow):
     # Automated / explicit basecalling
     # ------------------------------------------------------------------
 
+    def _dll_tail_recover(self, positions, split=6000, min_sep=4, snap_r=2,
+                          apply_snap=False, enable=True):
+        """Fold-in DLL-tail recovery: replace tail positions (scan >= split)
+        with per-channel detection on the z-scored separated lanes, then
+        optionally apply the FUN_10019280 quadratic snap.
+
+        Positions are the *current* GUI grid (self._last_positions).  The
+        well's cache_sep lanes (z-scored) drive the tail detection.
+        Returns (new_positions, sequence) already sorted; falls back to the
+        original numbers when cache_sep is unavailable or enable is False.
+        """
+        if not enable or positions is None or len(positions) == 0:
+            return positions, None
+        well = getattr(self, 'current_well', None)
+        if not well:
+            well = self.well_combo.currentText().strip()
+        seps = np.array([], dtype=np.float64)
+        base = os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))          # toolkit/ -> ROLL
+        cache_dir = os.path.join(base, 'cache_sep')
+        cand = os.path.join(cache_dir, f'{well}.npy')
+        try:
+            sep = np.load(cand)
+        except OSError:
+            cand = os.path.join(base, well, 'cache_sep', f'{well}.npy')
+            try:
+                sep = np.load(cand)
+            except OSError:
+                return positions, None
+        Z = dll_tail._zs(sep)
+        merged, seq = dll_tail.dll_tail_positions(
+            np.asarray(positions, dtype=np.int64), Z,
+            split=split, min_sep=min_sep, snap_r=snap_r,
+            apply_snap=apply_snap)
+        if len(merged) == 0 and len(positions) > 0:
+            return positions, None
+        return merged, seq
+
     def _run_basecall(self):
         """Run the independent peak-call with current settings and update
         the FASTA box, plot, and status. Can be called programmatically:
@@ -1960,6 +2048,19 @@ class SequencingGUI(QMainWindow):
             # shift itself. See the note in _update_plot for why passing an
             # already-shifted trace here double-applies it.
             pos, seq, groups, ints = self._call_bases(separated, shifts, region)
+            if self.dll_tail_enabled and pos is not None and len(pos):
+                # DLL-tail recovery only on full-read calls (not per-band):
+                # trigger when the region spans most of the trace.
+                if region is not None and (region[1] - region[0]) > 3000:
+                    pos, dllseq = self._dll_tail_recover(
+                        pos, split=self.dll_tail_split,
+                        min_sep=self.dll_tail_min_sep,
+                        snap_r=self.dll_tail_snap_r,
+                        apply_snap=self.dll_tail_apply_snap)
+                    if dllseq is not None:
+                        seq = dllseq
+                        groups = [[]] * len(pos)
+                        ints = [0.0] * len(pos)
             self._last_positions = pos
             self._manual_sequence = seq
             self._update_fasta_box(seq)
@@ -2967,7 +3068,6 @@ class SequencingGUI(QMainWindow):
         ax4.set_ylabel('ESD traces (MegaBACE)', fontsize=8)
         ax4.set_xlabel('Scan / Record index (aligned)', fontsize=8)
         ax4.tick_params(labelsize=7)
-        ax4.legend(fontsize=5, ncol=4, loc='upper right')
         if esd_offset:
             ax4.text(0.01, 0.95,
                      f'ESD trace shifted +{esd_offset} to align under labels',
@@ -3133,6 +3233,20 @@ class SequencingGUI(QMainWindow):
                         iupac_seq = ''.join(t[1] for t in merged)
                         fillin_pos = [int(t[0]) for t in fillin_add]
                 fillin_set = set(fillin_pos)
+                if pos is not None and len(pos) and self.dll_tail_enabled \
+                        and region is not None and (region[1] - region[0]) > 3000:
+                    pos_t, dllseq = self._dll_tail_recover(
+                        np.asarray(pos, dtype=np.int64),
+                        split=self.dll_tail_split,
+                        min_sep=self.dll_tail_min_sep,
+                        snap_r=self.dll_tail_snap_r,
+                        apply_snap=self.dll_tail_apply_snap)
+                    if dllseq is not None and len(dllseq) == len(pos_t):
+                        pos = pos_t
+                        iupac_seq = dllseq
+                        fillin_set = set()
+                self._last_positions = (np.asarray(pos, dtype=np.int64).copy()
+                                        if pos is not None else None)
                 # Bases sit in one flat row near the top of the plot,
                 # rather than riding up and down with each peak's own
                 # height - easier to read as a continuous sequence.

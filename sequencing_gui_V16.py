@@ -9,21 +9,25 @@ import sys, os, struct, json, subprocess, tempfile
 import numpy as np
 
 import multiview_peakdetect as mvpd
+import dll_tail
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
     QGroupBox, QGridLayout, QSlider, QTextEdit, QSplitter, QTabWidget,
     QFileDialog, QProgressBar, QScrollArea, QFrame, QDialog, QLineEdit,
-    QDialogButtonBox
+    QDialogButtonBox, QMenuBar, QMenu, QAction, QActionGroup, QToolBar,
+    QSizePolicy, QStatusBar, QTableWidget, QTableWidgetItem
 )
 from PyQt5.QtCore import Qt, QTimer, QSettings, QThread, pyqtSignal
+from PyQt5.QtGui import QFont
 
 import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.collections import LineCollection
+import matplotlib.lines as mlines
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from extract_training_data import parse_rsd, parse_esd
@@ -46,14 +50,14 @@ from dsp import (
     find_esd_subdirs, make_matrix_from_diagonals,
     dsp_shift_channel, dsp_apply_mobility_shifts, dsp_full_pipeline,
     dsp_compute_baseline, dsp_smooth_signal, dsp_separate_channels,
-    dsp_dominant_periodicities,
+    dsp_dominant_periodicities, dsp_bandpass, dsp_bandpass_channels,
 )
 from basecall import (
     pc_normalize_peaks, pc_normalize_display,
     pc_detect_peaks_4ch, pc_call_bases,
     pc_signal_onset, pc_signal_region,
     pc_call_bases_with_shifts, pc_call_bases_greedy,
-    pc_fill_in_combined_peaks, pc_fill_in_shoulders,
+    pc_fill_in_combined_peaks,
     pc_lifetrace_peaks_shape, pc_lifetrace_transform,
     pc_lifetrace_basecall, pc_hybrid_basecall,
     pc_estimate_mobility_shifts,
@@ -62,6 +66,22 @@ from align import (
     pc_nw_identity, pc_reference_accuracy,
     ref_semiglobal_identity, ref_local_identity, _ref_revcomp,
 )
+from quality import pmax_to_phred, quality_distribution
+from trim import sliding_window_trim
+from export import write_fasta, write_fastq
+from batch_dialog import BatchDialog
+
+try:
+    from cnn_confidence import get_estimator as _get_cnn
+    _CNN_AVAILABLE = True
+except Exception:
+    _CNN_AVAILABLE = False
+
+try:
+    from abi_reader import read_chromatogram, abi_to_rsd_traces
+    _ABI_AVAILABLE = True
+except Exception:
+    _ABI_AVAILABLE = False
 
 DEFAULT_DATA_DIR = "/media/tv/78B0C7DE1FA7081C/electropherogram/MB1000_M13_DT"
 class ReferenceDialog(QDialog):
@@ -115,6 +135,14 @@ class ReferenceDialog(QDialog):
         lay.addWidget(self.esd_result)
         lay.addWidget(self.ind_result)
 
+        # Error decomposition display
+        self.error_detail = QTextEdit()
+        self.error_detail.setReadOnly(True)
+        self.error_detail.setMaximumHeight(120)
+        self.error_detail.setFont(QFont('Courier', 9))
+        self.error_detail.setPlaceholderText('Error breakdown appears here after Compare')
+        lay.addWidget(self.error_detail)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -160,17 +188,60 @@ class ReferenceDialog(QDialog):
         ref_slice = ref[lo - 1:hi]
 
         esd_seq = gui.esd_data.get('sequence', '')
-        # Use the caller shown in the plot (tolerance + fill-in knobs), not
-        # the old standalone pc_call_bases path. _update_plot refreshes it
-        # synchronously so the comparison always matches what is on screen.
-        gui._update_plot()
+        # Use the improved full basecall (incl. DLL-tail recovery); _run_basecall
+        # refreshs _manual_sequence + _last_positions synchronously so the
+        # comparison always matches the sequence the user sees / exports.
+        gui._run_basecall()
         ind_seq = gui._manual_sequence or ''
         if not ind_seq:
             gui._run_independent_peakcall()
             ind_seq = gui._independent_seq or ''
 
-        for label, seq, box in (('ESD', esd_seq, self.esd_result),
-                                ('Independent', ind_seq, self.ind_result)):
+        # Scope the comparison to the currently set region (scan window) so
+        # one can tune a single window to high identity. When the GUI region
+        # spin range is non-trivial, restrict each caller's sequence to the
+        # bases whose positions fall inside that window; otherwise the whole
+        # read is used.
+        window = None
+        try:
+            r0 = int(gui.region_start_spin.value())
+            r1 = int(gui.region_stop_spin.value())
+            if r1 > r0:
+                window = (r0, r1)
+        except AttributeError:
+            pass
+
+        def _scoped(seq, positions):
+            """Return (scoped_seq, dropped_before, dropped_after) or
+            (seq, 0, 0) when no window / no positions available."""
+            if window is None or not seq or positions is None:
+                return seq, 0, 0
+            pos = np.asarray(positions, dtype=np.int64)
+            n = min(len(seq), len(pos))
+            if n == 0:
+                return seq, 0, 0
+            keep = (pos[:n] >= window[0]) & (pos[:n] <= window[1])
+            scoped = ''.join(seq[i] for i in range(n) if keep[i])
+            return (scoped,
+                    int(np.count_nonzero(pos[:n] < window[0])),
+                    int(np.count_nonzero(pos[:n] > window[1])))
+
+        esd_pos = (gui.esd_data.get('peak_positions')
+                   if gui.esd_data is not None else None)
+        if esd_pos is None:
+            esd_pos = (gui.esd_data.get('bases_positions')
+                       if gui.esd_data is not None else None)
+        ind_pos = getattr(gui, '_last_positions', None)
+        esd_seq, esd_drop_b, esd_drop_a = _scoped(esd_seq, esd_pos)
+        ind_seq, ind_drop_b, ind_drop_a = _scoped(ind_seq, ind_pos)
+        scope_note = (f' (window {window[0]}..{window[1]})' if window
+                      else ' (whole read)')
+
+        detail_lines = []
+        for label, seq, box, db, da in (
+                ('ESD', esd_seq, self.esd_result, esd_drop_b, esd_drop_a),
+                ('Independent', ind_seq, self.ind_result,
+                 ind_drop_b, ind_drop_a)):
             if not seq:
                 box.setText(f'{label} vs reference: no sequence')
                 continue
@@ -183,12 +254,25 @@ class ReferenceDialog(QDialog):
             drop_start = qlo
             drop_end = max(0, len(seq) - 1 - qhi)
             box.setText(
-                f'{label} vs reference (BLAST local): {ident:.1f}%\n'
+                f'{label} vs reference (BLAST local){scope_note}: '
+                f'{ident:.1f}%\n'
                 f'  {mm} matches, {mmis} mismatch, {ind} indel '
                 f'= {errors} errors ({aligned} bases aligned)\n'
                 f'  {orient} read · best segment ref {lo + rlo}..{lo + rhi}\n'
                 f'  {drop_start} bp dropped at read start, '
-                f'{drop_end} at read end')
+                f'{drop_end} at read end '
+                f'(+{db} pre-window, +{da} post-window)')
+            detail_lines.append(f'--- {label} error decomposition ---')
+            detail_lines.append(f'  Identity: {ident:.2f}%  ({mm}/{aligned} matches)')
+            detail_lines.append(f'  Mismatches: {mmis}  Indels: {ind}')
+            if mmis > 0 and len(mism) > 0:
+                detail_lines.append(f'  Mismatch positions (read_pos: query->ref):')
+                for rp, qb, rb, rfp in mism[:15]:
+                    detail_lines.append(f'    {rp}: {qb}->{rb} (ref pos {lo+rfp})')
+                if len(mism) > 15:
+                    detail_lines.append(f'    ... and {len(mism)-15} more')
+            detail_lines.append('')
+        self.error_detail.setText('\n'.join(detail_lines) if detail_lines else 'No data')
 
     def accept(self):
         self.gui.reference_name = self.name_edit.text().strip()
@@ -199,26 +283,484 @@ class ReferenceDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# BLAST Report Dialog
+# ---------------------------------------------------------------------------
+
+def _blast_align_details(query, reference):
+    """Affine-gap local alignment returning detailed error positions.
+
+    Returns dict with identity, matches, mismatches, indels, aligned_len,
+    error_positions (list of (read_pos, ref_pos, err_type, q_base, r_base)),
+    read_span (start, end), ref_span (start, end)."""
+    q, r = query, reference
+    m, n = len(q), len(r)
+    if m == 0 or n == 0:
+        return None
+    NEG = -10**9
+    match_s, mismatch_s, gopen, gext = 2, -3, 11, 2
+    Mp = [0] * (n + 1)
+    Xp = [NEG] * (n + 1)
+    Yp = [NEG] * (n + 1)
+    TB, V = [], []
+    best = (0, 0, 0)
+    for i in range(1, m + 1):
+        qi = q[i - 1]
+        Mrow = [0] * (n + 1)
+        Xrow = [NEG] * (n + 1)
+        Yrow = [NEG] * (n + 1)
+        trow = [0] * (n + 1)
+        vrow = [0] * (n + 1)
+        for j in range(1, n + 1):
+            base = Mp[j - 1]
+            if Xp[j - 1] > base:
+                base = Xp[j - 1]
+            if Yp[j - 1] > base:
+                base = Yp[j - 1]
+            Mrow[j] = (base if base > 0 else 0) + \
+                (match_s if qi == r[j - 1] else mismatch_s)
+            xa = Mp[j] - gopen
+            xb = Xp[j] - gext
+            Xrow[j] = xa if xa > xb else xb
+            ya = Mrow[j - 1] - gopen
+            yb = Yrow[j - 1] - gext
+            Yrow[j] = ya if ya > yb else yb
+            v = Mrow[j]
+            if Xrow[j] > v:
+                v = Xrow[j]
+            if Yrow[j] > v:
+                v = Yrow[j]
+            vrow[j] = v
+            trow[j] = 0 if v == Mrow[j] else (1 if v == Xrow[j] else 2)
+            if v > best[0]:
+                best = (v, i, j)
+        TB.append(trow)
+        V.append(vrow)
+        Mp, Xp, Yp = Mrow, Xrow, Yrow
+    _, bi, bj = best
+    matches = mismatches = indels = 0
+    errors = []
+    q_positions = []
+    r_positions = []
+    while bi > 0 and bj > 0:
+        v = V[bi - 1][bj]
+        if v <= 0:
+            break
+        d = TB[bi - 1][bj]
+        if d == 0:
+            qb, rb = q[bi - 1], r[bj - 1]
+            q_positions.append(bi - 1)
+            r_positions.append(bj - 1)
+            if qb == rb:
+                matches += 1
+            else:
+                mismatches += 1
+                errors.append((bi - 1, bj - 1, 'mismatch', qb, rb))
+            bi -= 1
+            bj -= 1
+        elif d == 1:
+            indels += 1
+            q_positions.append(bi - 1)
+            errors.append((bi - 1, -1, 'insertion', q[bi - 1], '-'))
+            bi -= 1
+        else:
+            indels += 1
+            r_positions.append(bj - 1)
+            errors.append((-1, bj - 1, 'deletion', '-', r[bj - 1]))
+            bj -= 1
+    aligned = matches + mismatches + indels
+    ident = 100.0 * matches / aligned if aligned else 0.0
+    rlo = min(r_positions) if r_positions else 0
+    rhi = max(r_positions) if r_positions else 0
+    qlo = min(q_positions) if q_positions else 0
+    qhi = max(q_positions) if q_positions else 0
+    return {
+        'identity': ident, 'matches': matches, 'mismatches': mismatches,
+        'indels': indels, 'aligned': aligned, 'score': best[0],
+        'errors': errors, 'read_span': (qlo, qhi), 'ref_span': (rlo, rhi),
+    }
+
+
+class BlastReportDialog(QDialog):
+    """Detailed BLAST-style comparison report for the current well.
+
+    Shows identity against M13 reference with full error decomposition,
+    error position scatter plot, and side-by-side comparison of our caller
+    vs Cimarron 3.12 (ESD)."""
+
+    def __init__(self, gui):
+        super().__init__(gui)
+        self.gui = gui
+        self.setWindowTitle('BLAST Report — M13 Reference Comparison')
+        self.setMinimumSize(800, 600)
+        lay = QVBoxLayout(self)
+
+        # Well selector + Run button
+        top = QHBoxLayout()
+        top.addWidget(QLabel('Well:'))
+        self.well_label = QLabel(gui.current_well or '--')
+        self.well_label.setStyleSheet('font-weight: bold;')
+        top.addWidget(self.well_label)
+        top.addSpacing(20)
+        self.run_btn = QPushButton('Run BLAST Report')
+        self.run_btn.clicked.connect(self._run)
+        top.addWidget(self.run_btn)
+        top.addStretch()
+        lay.addLayout(top)
+
+        # Splitter: text report + plot
+        splitter = QSplitter(Qt.Horizontal)
+
+        # Left: text report
+        self.report_box = QTextEdit()
+        self.report_box.setReadOnly(True)
+        self.report_box.setFont(QFont('Courier', 10))
+        self.report_box.setPlaceholderText('Click "Run BLAST Report" to analyze')
+        splitter.addWidget(self.report_box)
+
+        # Right: matplotlib error position plot
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        self.fig = Figure(figsize=(4, 5), dpi=100)
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        splitter.addWidget(self.canvas)
+
+        splitter.setSizes([400, 400])
+        lay.addWidget(splitter, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Save)
+        buttons.accepted.connect(self.accept)
+        buttons.button(QDialogButtonBox.Save).clicked.connect(self._save)
+        lay.addWidget(buttons)
+
+        self._result = None
+
+    def _get_sequence(self, caller='ours'):
+        gui = self.gui
+        if caller == 'esd':
+            if gui.esd_data is None:
+                return ''
+            return ''.join(c for c in gui.esd_data.get('sequence', '')
+                           if c in 'ACGTN').upper()
+        seq = getattr(gui, '_manual_sequence', '')
+        if not seq:
+            gui._update_plot()
+            seq = getattr(gui, '_manual_sequence', '')
+        return ''.join(c for c in seq if c in 'ACGTN').upper()
+
+    def _get_reference(self):
+        ref = getattr(self.gui, 'reference_dna', '')
+        if not ref:
+            try:
+                from simple_align import M13_REFERENCE
+                ref = M13_REFERENCE
+            except ImportError:
+                pass
+        return ref
+
+    def _run(self):
+        well = self.gui.current_well
+        if well is None:
+            self.report_box.setText('Load a well first')
+            return
+        self.well_label.setText(well)
+        QApplication.processEvents()
+
+        ref = self._get_reference()
+        if not ref:
+            self.report_box.setText('No reference set. Use Edit > Reference DNA to set one, '
+                                    'or ensure M13 reference is available.')
+            return
+
+        our_seq = self._get_sequence('ours')
+        esd_seq = self._get_sequence('esd')
+
+        lines = []
+        lines.append(f'BLAST Report — Well {well}')
+        lines.append('=' * 50)
+        lines.append('')
+
+        # Our caller vs M13
+        if our_seq:
+            q = ''.join(c for c in our_seq if c in 'ACGT')
+            fwd = _blast_align_details(q, ref)
+            rev = _blast_align_details(_ref_revcomp(q), ref)
+            best = rev if rev and (not fwd or rev['score'] >= fwd['score']) else fwd
+            orient = 'reverse-complement' if rev and (not fwd or rev['score'] >= fwd['score']) else 'forward'
+            if best:
+                lines.append(f'OUR CALLER vs M13 ({orient}):')
+                lines.append(f'  Identity:    {best["identity"]:.2f}%')
+                lines.append(f'  Matches:     {best["matches"]}')
+                lines.append(f'  Mismatches:  {best["mismatches"]}')
+                lines.append(f'  Indels:      {best["indels"]}')
+                lines.append(f'  Aligned:     {best["aligned"]} bases')
+                lines.append(f'  Read span:   {best["read_span"][0]}..{best["read_span"][1]} ({best["read_span"][1]-best["read_span"][0]+1} bp)')
+                lines.append(f'  Ref span:    {best["ref_span"][0]}..{best["ref_span"][1]}')
+                lines.append(f'  Read length: {len(q)}')
+                self._our_result = best
+            else:
+                lines.append('OUR CALLER vs M13: no alignment found')
+                self._our_result = None
+        else:
+            lines.append('OUR CALLER: no sequence available')
+            self._our_result = None
+
+        lines.append('')
+
+        # ESD vs M13
+        if esd_seq:
+            qe = ''.join(c for c in esd_seq if c in 'ACGT')
+            fwd_e = _blast_align_details(qe, ref)
+            rev_e = _blast_align_details(_ref_revcomp(qe), ref)
+            best_e = rev_e if rev_e and (not fwd_e or rev_e['score'] >= fwd_e['score']) else fwd_e
+            orient_e = 'reverse-complement' if rev_e and (not fwd_e or rev_e['score'] >= fwd_e['score']) else 'forward'
+            if best_e:
+                lines.append(f'CIMARRON 3.12 (ESD) vs M13 ({orient_e}):')
+                lines.append(f'  Identity:    {best_e["identity"]:.2f}%')
+                lines.append(f'  Matches:     {best_e["matches"]}')
+                lines.append(f'  Mismatches:  {best_e["mismatches"]}')
+                lines.append(f'  Indels:      {best_e["indels"]}')
+                lines.append(f'  Aligned:     {best_e["aligned"]} bases')
+                lines.append(f'  Read span:   {best_e["read_span"][0]}..{best_e["read_span"][1]} ({best_e["read_span"][1]-best_e["read_span"][0]+1} bp)')
+                lines.append(f'  Ref span:    {best_e["ref_span"][0]}..{best_e["ref_span"][1]}')
+                lines.append(f'  Read length: {len(qe)}')
+                self._esd_result = best_e
+            else:
+                lines.append('ESD vs M13: no alignment found')
+                self._esd_result = None
+        else:
+            lines.append('ESD: no sequence available')
+            self._esd_result = None
+
+        # Comparison
+        if self._our_result and self._esd_result:
+            oi = self._our_result['identity']
+            ei = self._esd_result['identity']
+            delta = oi - ei
+            lines.append('')
+            lines.append(f'COMPARISON:')
+            lines.append(f'  Our caller:  {oi:.2f}%')
+            lines.append(f'  Cimarron:    {ei:.2f}%')
+            lines.append(f'  Delta:       {delta:+.2f}%')
+            lines.append(f'  {"OUR CALLER WINS" if delta > 0 else "CIMARRON WINS"}')
+
+        # Error list (first 30)
+        if self._our_result and self._our_result['errors']:
+            lines.append('')
+            lines.append('ERROR POSITIONS (our caller):')
+            lines.append(f'  {"ReadPos":>8} {"RefPos":>8} {"Type":>10} {"Query":>5} {"Ref":>5}')
+            for rp, rfp, etype, qb, rb in self._our_result['errors'][:30]:
+                lines.append(f'  {rp:>8} {rfp:>8} {etype:>10} {qb:>5} {rb:>5}')
+            if len(self._our_result['errors']) > 30:
+                lines.append(f'  ... and {len(self._our_result["errors"]) - 30} more')
+
+        self.report_box.setText('\n'.join(lines))
+        self._plot_errors()
+
+    def _plot_errors(self):
+        self.fig.clear()
+        if not self._our_result:
+            self.canvas.draw()
+            return
+        n_plots = 1 + (1 if self._esd_result else 0)
+        ax1 = self.fig.add_subplot(n_plots, 1, 1)
+        errors = self._our_result['errors']
+        if errors:
+            xs = [e[0] for e in errors if e[0] >= 0]
+            types = [e[2] for e in errors if e[0] >= 0]
+            colors = ['#cc0000' if t == 'mismatch' else '#0066cc' if t == 'insertion' else '#009900' for t in types]
+            ax1.scatter(xs, [1] * len(xs), c=colors, s=15, alpha=0.7, edgecolors='none')
+            ax1.set_xlim(0, max(xs) + 50 if xs else 100)
+        ax1.set_yticks([])
+        ax1.set_xlabel('Read Position')
+        ax1.set_title(f'Error positions — Our caller ({len(errors)} errors)', fontsize=10)
+        ax1.legend(handles=[
+            mlines.Line2D([0], [0], marker='o', color='w', markerfacecolor='#cc0000', markersize=8, label='Mismatch'),
+            mlines.Line2D([0], [0], marker='o', color='w', markerfacecolor='#0066cc', markersize=8, label='Insertion'),
+            mlines.Line2D([0], [0], marker='o', color='w', markerfacecolor='#009900', markersize=8, label='Deletion'),
+        ], loc='upper right', fontsize=8)
+
+        if self._esd_result:
+            ax2 = self.fig.add_subplot(n_plots, 1, 2)
+            esd_errors = self._esd_result['errors']
+            if esd_errors:
+                xs2 = [e[0] for e in esd_errors if e[0] >= 0]
+                types2 = [e[2] for e in esd_errors if e[0] >= 0]
+                colors2 = ['#cc0000' if t == 'mismatch' else '#0066cc' if t == 'insertion' else '#009900' for t in types2]
+                ax2.scatter(xs2, [1] * len(xs2), c=colors2, s=15, alpha=0.7, edgecolors='none')
+                ax2.set_xlim(0, max(xs2) + 50 if xs2 else 100)
+            ax2.set_yticks([])
+            ax2.set_xlabel('Read Position')
+            ax2.set_title(f'Error positions — Cimarron ({len(esd_errors)} errors)', fontsize=10)
+
+        self.fig.tight_layout()
+        self.canvas.draw()
+
+    def _save(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Save BLAST Report', '',
+            'Text Files (*.txt);;All Files (*)')
+        if not path:
+            return
+        with open(path, 'w') as f:
+            f.write(self.report_box.toPlainText())
+        self.report_box.append(f'\n\nReport saved to {path}')
+
+
+class BatchM13Dialog(QDialog):
+    """Batch M13 comparison: run BLAST-style identity on all wells and show
+    a summary table."""
+
+    def __init__(self, gui):
+        super().__init__(gui)
+        self.gui = gui
+        self.setWindowTitle('Batch M13 Comparison')
+        self.setMinimumSize(700, 500)
+        lay = QVBoxLayout(self)
+
+        info = QLabel('Runs BLAST-style local alignment (affine-gap SW) on all wells. '
+                       'Requires M13 reference to be set (Edit > Reference DNA).')
+        info.setWordWrap(True)
+        info.setStyleSheet('color: #666;')
+        lay.addWidget(info)
+
+        top = QHBoxLayout()
+        self.run_btn = QPushButton('Run on All Wells')
+        self.run_btn.clicked.connect(self._run)
+        top.addWidget(self.run_btn)
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        top.addWidget(self.progress, stretch=1)
+        lay.addLayout(top)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels([
+            'Well', 'Caller', 'Identity%', 'Matches', 'Mismatches', 'Indels', 'Aligned', 'ReadLen'])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        lay.addWidget(self.table, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Save)
+        buttons.accepted.connect(self.accept)
+        buttons.button(QDialogButtonBox.Save).clicked.connect(self._save)
+        lay.addWidget(buttons)
+
+        self._all_results = []
+
+    def _get_ref(self):
+        ref = getattr(self.gui, 'reference_dna', '')
+        if not ref:
+            try:
+                from simple_align import M13_REFERENCE
+                ref = M13_REFERENCE
+            except ImportError:
+                pass
+        return ref
+
+    def _run(self):
+        ref = self._get_ref()
+        if not ref:
+            return
+        data_dir = self.gui.data_dir
+        if not data_dir:
+            return
+        esd_dir = self.gui.esd_combo.currentData() or ''
+        gt_dir = os.path.join(data_dir, esd_dir) if esd_dir else data_dir
+
+        wells = sorted([f.replace('.rsd', '') for f in os.listdir(data_dir)
+                        if f.endswith('.rsd')])
+        self.progress.setVisible(True)
+        self.progress.setRange(0, len(wells))
+        self.progress.setValue(0)
+        self.table.setRowCount(0)
+        self._all_results = []
+
+        for idx, well in enumerate(wells):
+            self.progress.setValue(idx)
+            QApplication.processEvents()
+
+            esd_path = os.path.join(gt_dir, f'{well}.esd')
+            esd_seq = ''
+            if os.path.exists(esd_path):
+                try:
+                    from extract_training_data import parse_esd
+                    esd_data = parse_esd(esd_path)
+                    esd_seq = ''.join(c for c in esd_data.get('sequence', '')
+                                      if c in 'ACGTN').upper()
+                except Exception:
+                    pass
+
+            for caller, seq in [('ESD', esd_seq)]:
+                if not seq:
+                    continue
+                q = ''.join(c for c in seq if c in 'ACGT')
+                if len(q) < 20:
+                    continue
+                fwd = _blast_align_details(q, ref)
+                rev = _blast_align_details(_ref_revcomp(q), ref)
+                best = rev if rev and (not fwd or rev['score'] >= fwd['score']) else fwd
+                if not best:
+                    continue
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                best['read_len'] = len(q)
+                self._all_results.append((well, caller, best))
+                vals = [well, caller, f'{best["identity"]:.2f}',
+                        str(best['matches']), str(best['mismatches']),
+                        str(best['indels']), str(best['aligned']), str(len(q))]
+                for col, v in enumerate(vals):
+                    self.table.setItem(row, col, QTableWidgetItem(v))
+
+        self.progress.setVisible(False)
+        self.table.resizeColumnsToContents()
+
+    def _save(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Save Batch Report', '',
+            'CSV Files (*.csv);;All Files (*)')
+        if not path:
+            return
+        with open(path, 'w') as f:
+            f.write('Well,Caller,Identity%,Matches,Mismatches,Indels,Aligned,ReadLen\n')
+            for well, caller, r in self._all_results:
+                f.write(f'{well},{caller},{r["identity"]:.2f},'
+                        f'{r["matches"]},{r["mismatches"]},{r["indels"]},'
+                        f'{r["aligned"]},{r["read_len"]}\n')
+        self.status_label.setText(f'Report saved to {path}' if hasattr(self, 'status_label') else None)
+
+
+# ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
 class SequencingGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Sequencing Basecaller GUI V10')
-        self.setGeometry(50, 50, 1500, 950)
-        self.rsd_raw = None
-        self.esd_traces = None
-        self.esd_data = None
-        self.esd_offset = 0
-        self.current_well = None
-        self._saved_lims = {}
-        self._smooth_mode = 'Savitzky-Golay'
-        self._manual_sequence = ''
-        self._shift_lines = {}
-        self._drag_channel = None
+        self.setWindowTitle('Sanger Toolkit — Basecaller GUI V15')
         self._drag_start_x = 0
+        self._drag_channel = None
         self._last_separated = None
+        self._last_positions = None
         self._independent_seq = None
+        self.rsd_raw = None
+        self.esd_data = None
+        self.esd_traces = None
+        # Label->record offset: maps an ESD peak_positions value p onto the
+        # esd_traces record that letter was called on (p - label_off), i.e.
+        # the .esd's own internal axis. Kept separate from the user-facing
+        # record->scan offset (esd_offset_spin) because peak_positions carry
+        # a small constant bias (~+10 scans) relative to the physical
+        # separated-trace peaks: record r sits at scan r+1998, yet the letter
+        # at p sits on record p-2008 (=> letter physically at p-10). Mixing
+        # them up made the letters stay pinned at p while only the waveform
+        # slid with the spin.
+        self._esd_label_off = 0
+        self.dll_tail_enabled = True
+        self.dll_tail_split = 6000
+        self.dll_tail_min_sep = 4
+        self.dll_tail_snap_r = 2
+        self.dll_tail_apply_snap = False
         self.reference_name = 'M13 M77815.1'
         self.reference_dna = ''
         self.reference_start = 5300
@@ -252,84 +794,132 @@ class SequencingGUI(QMainWindow):
         self.setCentralWidget(main)
         layout = QVBoxLayout(main)
         layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
 
-        # -- Top bar --
-        top = QHBoxLayout()
-        layout.addLayout(top)
-        self.data_dir_btn = QPushButton('Select Data Folder…')
-        self.data_dir_btn.setToolTip(
-            'Choose the folder that contains the .rsd sequencing files '
-            '(and the per-run ESD subfolders like *_MD1).')
-        self.data_dir_btn.clicked.connect(self._select_data_folder)
-        top.addWidget(self.data_dir_btn)
+        # ── Menu bar ───────────────────────────────────────────────────
+        mb = self.menuBar()
+
+        file_menu = mb.addMenu('&File')
+        self._data_dir_act = file_menu.addAction('Select &Data Folder...')
+        self._data_dir_act.triggered.connect(self._select_data_folder)
+        self._import_abi_act = file_menu.addAction('&Import ABI/SCF...')
+        self._import_abi_act.triggered.connect(self._import_abi)
+        self._import_abi_act.setVisible(_ABI_AVAILABLE)
+        file_menu.addSeparator()
+        self._save_settings_act = file_menu.addAction('&Save Settings...')
+        self._save_settings_act.triggered.connect(self._save_settings_to_file)
+        self._load_settings_act = file_menu.addAction('&Load Settings...')
+        self._load_settings_act.triggered.connect(self._load_settings_from_file)
+        file_menu.addSeparator()
+        self._save_data_act = file_menu.addAction('Save &Processed Data...')
+        self._save_data_act.triggered.connect(self._save_data)
+        self._export_fasta_act = file_menu.addAction('Export &FASTA')
+        self._export_fasta_act.triggered.connect(self._save_fasta)
+        self._export_ml_act = file_menu.addAction('Export &ML FASTA')
+        self._export_ml_act.triggered.connect(self._export_ml_fasta)
+        self._export_ml_act.setEnabled(False)
+        file_menu.addSeparator()
+        self._batch_act = file_menu.addAction('&Batch Process...')
+        self._batch_act.triggered.connect(self._open_batch_dialog)
+        file_menu.addSeparator()
+        file_menu.addAction('E&xit', self.close, 'Ctrl+Q')
+
+        edit_menu = mb.addMenu('&Edit')
+        self._reference_act = edit_menu.addAction('Reference &DNA...')
+        self._reference_act.triggered.connect(self._open_reference_dialog)
+        edit_menu.addSeparator()
+        self._mobility_act = edit_menu.addAction('Auto &Mobility Shift (calib.)')
+        self._mobility_act.triggered.connect(self._run_auto_mobility)
+
+        view_menu = mb.addMenu('&View')
+        self._reset_view_act = view_menu.addAction('&Reset View')
+        self._reset_view_act.setShortcut('R')
+        self._reset_view_act.triggered.connect(self._reset_view)
+        self._drag_mode_act = view_menu.addAction('&Drag Shift Lines')
+        self._drag_mode_act.setCheckable(True)
+        self._drag_mode_act.toggled.connect(self._on_drag_mode_toggled)
+        view_menu.addSeparator()
+        self._revcomp_act = view_menu.addAction('&Reverse Complement')
+        self._revcomp_act.setCheckable(True)
+        self._revcomp_act.setShortcut('G')
+        self._revcomp_act.toggled.connect(self._schedule_update)
+        self._qscore_act = view_menu.addAction('&Q-score Bar')
+        self._qscore_act.setCheckable(True)
+        self._qscore_act.setChecked(True)
+        self._qscore_act.setShortcut('Q')
+        self._qscore_act.toggled.connect(self._schedule_update)
+
+        analyze_menu = mb.addMenu('&Analyze')
+        self._ml_act = analyze_menu.addAction('Run &ML Basecalling')
+        self._ml_act.triggered.connect(self._run_ml)
+        self._peakcall_act = analyze_menu.addAction('Independent &Peak-call vs ESD')
+        self._peakcall_act.triggered.connect(self._run_independent_peakcall)
+        self._call_act = analyze_menu.addAction('&Run Basecall')
+        self._call_act.triggered.connect(self._run_basecall)
+        analyze_menu.addSeparator()
+        self._blast_act = analyze_menu.addAction('&BLAST Report...')
+        self._blast_act.triggered.connect(self._open_blast_report)
+        self._batch_m13_act = analyze_menu.addAction('Batch &M13 Comparison...')
+        self._batch_m13_act.triggered.connect(self._open_batch_m13)
+        analyze_menu.addSeparator()
+        self._optimize_act = analyze_menu.addAction('&Optimize Parameters...')
+        self._optimize_act.triggered.connect(self._run_optimizer)
+        self._overnight_act = analyze_menu.addAction('Run &Overnight (all wells)')
+        self._overnight_act.setCheckable(True)
+        self._cancel_opt_act = analyze_menu.addAction('&Cancel Optimization')
+        self._cancel_opt_act.triggered.connect(self._cancel_optimizer)
+        self._cancel_opt_act.setVisible(False)
+
+        help_menu = mb.addMenu('&Help')
+        help_menu.addAction('&Keyboard Shortcuts', self._show_shortcuts)
+        help_menu.addAction('&About', self._show_about)
+
+        # ── Compact toolbar (essential controls only) ──────────────────
+        tb = QWidget()
+        tb_l = QHBoxLayout(tb)
+        tb_l.setContentsMargins(0, 2, 0, 2)
+        tb_l.setSpacing(4)
         self.data_dir_label = QLabel(self.data_dir)
-        self.data_dir_label.setToolTip('Current data folder')
-        self.data_dir_label.setMaximumWidth(380)
-        self.data_dir_label.setStyleSheet('color: #555;')
-        top.addWidget(self.data_dir_label)
-        top.addSpacing(8)
-        top.addWidget(QLabel('Well:'))
+        self.data_dir_label.setToolTip('Current data folder (File > Select Data Folder to change)')
+        self.data_dir_label.setMaximumWidth(300)
+        self.data_dir_label.setStyleSheet('color: #555; font-size: 11px;')
+        tb_l.addWidget(self.data_dir_label)
+        tb_l.addSpacing(8)
+        tb_l.addWidget(QLabel('Well:'))
         self.well_combo = QComboBox()
         self.well_combo.setEditable(True)
         self.well_combo.setMinimumWidth(80)
         self.well_combo.setToolTip(
-            'Select the RSD (raw sequencing data) well to load. Typed '
-            'names are matched against the .rsd files in the data folder.')
-        top.addWidget(self.well_combo)
+            'Select the RSD well to load. Type a name or pick from the list.')
+        tb_l.addWidget(self.well_combo)
         self.load_btn = QPushButton('Load')
-        self.load_btn.setToolTip('Load the selected well\'s RSD trace and '
-                                 'its matching ESD basecall data and update '
-                                 'the plot.')
+        self.load_btn.setToolTip('Load the selected well\'s RSD trace and ESD data')
         self.load_btn.clicked.connect(self._load_data)
-        top.addWidget(self.load_btn)
-        top.addWidget(QLabel('  ESD variant:'))
+        tb_l.addWidget(self.load_btn)
+        tb_l.addSpacing(8)
+        tb_l.addWidget(QLabel('ESD:'))
         self.esd_combo = QComboBox()
-        self.esd_combo.setToolTip(
-            'Choose which ESD (basecaller output) variant to compare '
-            'against. "Cp312" is the standard alignment. Other entries are '
-            'alternate peak-calling variants; use Cp312 for the best '
-            'machine-learning match.')
-        top.addWidget(self.esd_combo)
-        top.addSpacing(4)
-        top.addWidget(QLabel('ESD offset:'))
+        self.esd_combo.setToolTip('ESD variant to compare against (Cp312 is standard)')
+        self.esd_combo.setMinimumWidth(100)
+        tb_l.addWidget(self.esd_combo)
+        tb_l.addWidget(QLabel('offset:'))
         self.esd_offset_spin = QSpinBox()
         self.esd_offset_spin.setRange(-20000, 40000)
         self.esd_offset_spin.setValue(0)
         self.esd_offset_spin.setSingleStep(10)
-        self.esd_offset_spin.setMinimumWidth(90)
-        self.esd_offset_spin.setToolTip(
-            'Manual horizontal shift applied to the ESD trace (records -> '
-            'scans) so the ESD bases sit under our basecall for comparison. '
-            'Auto-estimated on load, but you can fine-tune it here and even '
-            'use it to compare alternate ESD variants (each may need its own '
-            'offset).')
+        self.esd_offset_spin.setMinimumWidth(80)
+        self.esd_offset_spin.setToolTip('Manual ESD trace horizontal shift')
         self.esd_offset_spin.valueChanged.connect(self._schedule_update)
-        top.addWidget(self.esd_offset_spin)
-        top.addSpacing(12)
-        self.save_settings_btn = QPushButton('Save settings…')
-        self.save_settings_btn.setToolTip(
-            'Write all current settings (baseline, smoothing, matrix, '
-            'mobility shifts, calling thresholds, norm window, well and ESD '
-            'variant) to a JSON text file so the same basecall can be '
-            'reproduced later or on another machine.')
-        self.save_settings_btn.clicked.connect(self._save_settings_to_file)
-        top.addWidget(self.save_settings_btn)
-        self.load_settings_btn = QPushButton('Load settings…')
-        self.load_settings_btn.setToolTip(
-            'Read a previously saved settings JSON text file, apply it to '
-            'the controls and re-run the basecall.')
-        self.load_settings_btn.clicked.connect(self._load_settings_from_file)
-        top.addWidget(self.load_settings_btn)
-        self.reference_btn = QPushButton('Reference DNA…')
-        self.reference_btn.setToolTip(
-            'Compare the ESD basecall and the independent caller against a '
-            'known reference sequence (e.g. M13), to measure how many real '
-            'errors each caller has. The reference is stored in the settings '
-            'JSON so it can be reused for other fragments later.')
-        self.reference_btn.clicked.connect(self._open_reference_dialog)
-        top.addWidget(self.reference_btn)
-
-        # -- Figure + canvas + toolbar --
+        tb_l.addWidget(self.esd_offset_spin)
+        tb_l.addStretch()
+        self.progress = QProgressBar()
+        self.progress.setMaximumWidth(150)
+        self.progress.setVisible(False)
+        tb_l.addWidget(self.progress)
+        self.status = QLabel('Load a well to begin')
+        self.status.setStyleSheet('color: gray; font-size: 11px;')
+        tb_l.addWidget(self.status, 1)
+        layout.addWidget(tb)
         self.fig = Figure(figsize=(14, 11), dpi=100)
         self.fig.subplots_adjust(hspace=0.08, left=0.14, right=0.98, top=0.97, bottom=0.05)
         # The figure's sizeHint would otherwise be 1400x1100px, and inside the
@@ -343,8 +933,7 @@ class SequencingGUI(QMainWindow):
         self.canvas.mpl_connect('motion_notify_event', self._on_canvas_move)
         self.canvas.mpl_connect('button_release_event', self._on_canvas_release)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
-        top.addWidget(self.toolbar)
-        top.addStretch()
+        self._shift_lines = {}
 
         # -- Sliders panel (narrow left sidebar so the plots get more room) --
         sliders_scroll = QScrollArea()
@@ -495,6 +1084,63 @@ class SequencingGUI(QMainWindow):
         smg_g.addLayout(hl2)
         sliders_l.addWidget(smg)
 
+        # Band filter group
+        bfg = QGroupBox('Band Filter')
+        bfg.setToolTip(
+            'Butterworth bandpass filter applied after baseline correction '
+            'and before smoothing. Removes slow baseline ripple (high-pass) '
+            'and high-frequency detector noise (low-pass). Periods are in '
+            'scans: a period of 8 means the filter passes waves that repeat '
+            'every ~8 scans (typical Sanger peak width). Set High Period to '
+            '~4-6 to kill noise above peak frequency. Set Low Period to '
+            '~50-200 to kill slow baseline drift that baseline correction '
+            'missed. Leave both at 0 to disable.')
+        bfg_g = QGridLayout(bfg)
+        bfg_g.setVerticalSpacing(3)
+        bfg_g.setHorizontalSpacing(4)
+
+        bfg_g.addWidget(QLabel('Low (drift):'), 0, 0)
+        self.band_low_spin = QSpinBox()
+        self.band_low_spin.setRange(0, 10000)
+        self.band_low_spin.setValue(0)
+        self.band_low_spin.setSingleStep(10)
+        self.band_low_spin.setMinimumWidth(60)
+        self.band_low_spin.setSpecialValueText('off')
+        self.band_low_spin.setToolTip(
+            'High-pass cutoff period (scans). Frequencies SLOWER than this '
+            'period are removed (baseline drift). 0 = disabled. Try 100-300 '
+            'for aggressive drift removal.')
+        self.band_low_spin.valueChanged.connect(self._schedule_update)
+        bfg_g.addWidget(self.band_low_spin, 0, 1)
+
+        bfg_g.addWidget(QLabel('High (noise):'), 1, 0)
+        self.band_high_spin = QSpinBox()
+        self.band_high_spin.setRange(0, 1000)
+        self.band_high_spin.setValue(0)
+        self.band_high_spin.setSingleStep(1)
+        self.band_high_spin.setMinimumWidth(60)
+        self.band_high_spin.setSpecialValueText('off')
+        self.band_high_spin.setToolTip(
+            'Low-pass cutoff period (scans). Frequencies FASTER than this '
+            'period are removed (electronic/detector noise). 0 = disabled. '
+            'Try 3-5 for noise above peak frequency. Typical Sanger peaks '
+            'are 5-15 scans wide.')
+        self.band_high_spin.valueChanged.connect(self._schedule_update)
+        bfg_g.addWidget(self.band_high_spin, 1, 1)
+
+        bfg_g.addWidget(QLabel('Order:'), 2, 0)
+        self.band_order_spin = QSpinBox()
+        self.band_order_spin.setRange(1, 10)
+        self.band_order_spin.setValue(2)
+        self.band_order_spin.setMinimumWidth(60)
+        self.band_order_spin.setToolTip(
+            'Butterworth filter order. Higher = sharper cutoff but more '
+            'ringing. 2 is a good default; try 1-4.')
+        self.band_order_spin.valueChanged.connect(self._schedule_update)
+        bfg_g.addWidget(self.band_order_spin, 2, 1)
+
+        sliders_l.addWidget(bfg)
+
         # Matrix group: full 4x4 grid
         mxg = QGroupBox('Matrix (row=channel, col=base)')
         mxg.setToolTip(
@@ -600,7 +1246,8 @@ class SequencingGUI(QMainWindow):
         self.method_combo.addItems(['Greedy (max-intensity)',
                                     'Per-channel (cluster)',
                                     'Cimarron (tuned)',
-                                    'Multiview (per-channel)'])
+                                    'Multiview (per-channel)',
+                                    'Segmented+ML (gated)'])
         self.method_combo.setToolTip(
             'Independent basecall strategy.\n\n'
             'Greedy (max-intensity): repeatedly call the strongest peak of '
@@ -865,6 +1512,36 @@ class SequencingGUI(QMainWindow):
         self.region_stop_spin.valueChanged.connect(self._schedule_update)
         rg_g.addWidget(QLabel('To:'), 3, 0)
         rg_g.addWidget(self.region_stop_spin, 3, 1)
+        # -- ML/CV basecall settings (Analyze -> Run ML Basecalling) --
+        # CNN softmax-confidence dropout: bases classified by the V4 CNN
+        # ensemble with peak-probability below this are dropped (call removed)
+        # instead of emitted. Removes spurious insertions that otherwise
+        # fragment the BLAST hit and drag coverage down; ~0.50 matches/beats
+        # the Cimarron DLL on coverage while keeping identity above it.
+        self.ml_drop_spin = QDoubleSpinBox()
+        self.ml_drop_spin.setDecimals(2)
+        self.ml_drop_spin.setSingleStep(0.05)
+        self.ml_drop_spin.setRange(0.0, 1.0)
+        self.ml_drop_spin.setValue(0.50)
+        self.ml_drop_spin.setToolTip(
+            'CNN confidence dropout for Run ML Basecalling. Any peak the V4 '
+            'CNN ensemble classifies with pmax below this value is dropped '
+            '(removed from the call) rather than emitted as a base. This '
+            'removes the spurious insertions that break the single best BLAST '
+            'hit, which is what keeps the DLL-style read coverage around 95%. '
+            '0.0 = emit everything; ~0.50 = best coverage/identity balance; '
+            'higher = cleaner but shorter reads.')
+        self.ml_drop_spin.valueChanged.connect(lambda _v: self._on_ml_drop_changed())
+        rg_g.addWidget(QLabel('CNN drop:'), 4, 0)
+        rg_g.addWidget(self.ml_drop_spin, 4, 1)
+        self.ml_hybrid_check = QCheckBox('Hybrid fallback to ESD')
+        self.ml_hybrid_check.setChecked(False)
+        self.ml_hybrid_check.setToolTip(
+            'If ticked, low-confidence CNN calls fall back to the Cimarron '
+            'ESD base call instead of being dropped. When the CNN drop '
+            'threshold above is used this should generally be off, so that '
+            'weak calls are removed (raising coverage) rather than replaced.')
+        rg_g.addWidget(self.ml_hybrid_check, 5, 0, 1, 2)
         sliders_l.addWidget(rg)
 
         # -- Matrix-stage tick boxes (narrow column left of the plots) --
@@ -922,104 +1599,21 @@ class SequencingGUI(QMainWindow):
         plots_l = QVBoxLayout(self._plots_container)
         plots_l.setContentsMargins(0, 0, 0, 0)
         plots_l.setSpacing(2)
+        plots_l.addWidget(self.toolbar)
         plots_l.addWidget(self._h_splitter, 1)
         self._v_splitter = QSplitter(Qt.Vertical)
         self._v_splitter.setChildrenCollapsible(False)
         self._v_splitter.addWidget(self._plots_container)
         layout.addWidget(self._v_splitter)
 
-        # -- Bottom bar --
-        bottom = QHBoxLayout()
-        self._plots_container.layout().addLayout(bottom)
-        self.save_btn = QPushButton('Save processed data...')
-        self.save_btn.setToolTip(
-            'Export the processed traces (baseline, corrected, smoothed, '
-            'separated) for the current well to a .npz file.')
-        self.save_btn.clicked.connect(self._save_data)
-        bottom.addWidget(self.save_btn)
-        self.ml_btn = QPushButton('Run ML basecalling')
-        self.ml_btn.setToolTip(
-            'Run the trained neural-network basecaller on the separated '
-            'trace and report its agreement with the ESD sequence.')
-        self.ml_btn.clicked.connect(self._run_ml)
-        bottom.addWidget(self.ml_btn)
-        self.ml_fasta_btn = QPushButton('Export ML FASTA')
-        self.ml_fasta_btn.setToolTip(
-            'Write the last ML basecall (at ESD peak positions) to a FASTA '
-            'file plus an alignment report vs both the ESD call and the '
-            'true M13 reference.')
-        self.ml_fasta_btn.clicked.connect(self._export_ml_fasta)
-        self.ml_fasta_btn.setEnabled(False)
-        bottom.addWidget(self.ml_fasta_btn)
-        self.peakcall_btn = QPushButton('Independent peak-call vs ESD')
-        self.peakcall_btn.setToolTip(
-            'Detects peaks on the separated trace itself (no ESD peak '
-            'positions used as input) and aligns the result against the '
-            "ESD sequence. This is the fair accuracy number - the plot's "
-            "'ESD match %' samples the trace at ESD's own peak positions, "
-            "which is circular.")
-        self.peakcall_btn.clicked.connect(self._run_independent_peakcall)
-        bottom.addWidget(self.peakcall_btn)
-        self.mobility_btn = QPushButton('Auto mobility shift (calib. run)')
-        self.mobility_btn.setToolTip(
-            'Cross-correlates channels to estimate a constant per-channel '
-            'lag. Only meaningful on a mobility/matrix calibration '
-            'standard, where all 4 dyes label the same fragments - on an '
-            "ordinary sequencing read the channels carry different bases "
-            "at different times and don't share peak timing to correlate.")
-        self.mobility_btn.clicked.connect(self._run_auto_mobility)
-        bottom.addWidget(self.mobility_btn)
-        self.optimize_btn = QPushButton('Optimize parameters...')
-        self.optimize_btn.setToolTip(
-            'Runs optimize_params.py (differential evolution) against the '
-            'currently loaded well, scoring candidates by independent '
-            'peak-call identity vs the ESD sequence, then loads the best '
-            'settings found into these controls.')
-        self.optimize_btn.clicked.connect(self._run_optimizer)
-        bottom.addWidget(self.optimize_btn)
-        self.cancel_opt_btn = QPushButton('Cancel optimization')
-        self.cancel_opt_btn.setToolTip('Terminate the running optimization process.')
-        self.cancel_opt_btn.clicked.connect(self._cancel_optimizer)
-        self.cancel_opt_btn.setVisible(False)
-        bottom.addWidget(self.cancel_opt_btn)
-        self.overnight_cb = QCheckBox('Run overnight (all wells, deep search)')
-        self.overnight_cb.setToolTip(
-            'When ticked, the optimizer runs on EVERY well with many more '
-            'iterations (it can take hours) so it explores far more of the '
-            'parameter space. Leave it running over night / the weekend.')
-        bottom.addWidget(self.overnight_cb)
-        self.reset_btn = QPushButton('Reset view')
-        self.reset_btn.setToolTip('Reset the plot zoom/pan back to the full view.')
-        self.reset_btn.clicked.connect(self._reset_view)
-        bottom.addWidget(self.reset_btn)
-        self.drag_mode_btn = QPushButton('Drag shift lines')
-        self.drag_mode_btn.setCheckable(True)
-        self.drag_mode_btn.setToolTip(
-            'Enable dragging colored vertical lines on the plot to adjust '
-            'per-channel mobility shifts. The shift is computed relative to '
-            'the current spin-box value and applied immediately.')
-        self.drag_mode_btn.toggled.connect(self._on_drag_mode_toggled)
-        self.drag_mode_btn.setVisible(False)
-        bottom.addWidget(self.drag_mode_btn)
-        self.call_btn = QPushButton('Run basecall')
-        self.call_btn.setToolTip('Run independent peak-calling with current shifts and matrix')
-        self.call_btn.clicked.connect(self._run_basecall)
-        bottom.addWidget(self.call_btn)
-        self.progress = QProgressBar()
-        self.progress.setMaximumWidth(200)
-        self.progress.setVisible(False)
-        self.progress.setToolTip('Progress of the currently running '
-                                 'optimization or batch task.')
-        bottom.addWidget(self.progress)
+        # -- Optimizer log (shown only during optimization) --
         self.opt_log = QTextEdit()
-        self.opt_log.setMaximumHeight(100)
+        self.opt_log.setMaximumHeight(80)
         self.opt_log.hide()
+        self.opt_log.setReadOnly(True)
         self.opt_log.setToolTip('Log output of the parameter optimizer.')
-        bottom.addWidget(self.opt_log)
-        bottom.addStretch()
-        self.status = QLabel('Load a well to begin')
-        self.status.setStyleSheet('color: gray;')
-        bottom.addWidget(self.status)
+        layout.addWidget(self.opt_log)
+
         self._fasta_box = None  # set up in _build_fasta_section
 
         faasta = self._build_fasta_section()
@@ -1102,18 +1696,20 @@ class SequencingGUI(QMainWindow):
         self._indep_metric_label.setStyleSheet(
             'color: #1a7a1a; font-weight: bold;')
         lay.addWidget(self._indep_metric_label)
+        self._qual_metric_label = QLabel('Q-score: --')
+        self._qual_metric_label.setToolTip(
+            'CNN-derived Phred quality score for the current basecall. '
+            'Q = -10*log10(1 - pmax) where pmax is the CNN softmax confidence.')
+        self._qual_metric_label.setStyleSheet(
+            'color: #cc6600; font-weight: bold;')
+        lay.addWidget(self._qual_metric_label)
+        self._m13_blast_label = QLabel('M13 BLAST: --')
+        self._m13_blast_label.setToolTip(METRIC_TOOLTIPS['M13 BLAST'])
+        self._m13_blast_label.setStyleSheet(
+            'color: #880088; font-weight: bold;')
+        lay.addWidget(self._m13_blast_label)
         lay.addStretch()
         return row
-
-    def _update_fasta_box(self, sequence):
-        if not sequence:
-            self._fasta_box.setText('')
-            return
-        well = self.current_well or 'unknown'
-        header = f'>{well}_manual'
-        wrapped = '\n'.join(sequence[i:i + 80] for i in range(0, len(sequence), 80))
-        self._fasta_box.setText(f'{header}\n{wrapped}')
-        self._fasta_box.setReadOnly(True)
 
     def _reference_local_identity(self, sequence):
         """Concordance of a basecall with the true reference sequence.
@@ -1219,6 +1815,11 @@ class SequencingGUI(QMainWindow):
         self._settings.setValue('region_hybrid', self.region_hybrid_check.isChecked())
         self._settings.setValue('region_start', self.region_start_spin.value())
         self._settings.setValue('region_stop', self.region_stop_spin.value())
+        self._settings.setValue('band_low', self.band_low_spin.value())
+        self._settings.setValue('band_high', self.band_high_spin.value())
+        self._settings.setValue('band_order', self.band_order_spin.value())
+        self._settings.setValue('ml_drop', self.ml_drop_spin.value())
+        self._settings.setValue('ml_hybrid', self.ml_hybrid_check.isChecked())
 
     def _restore_settings(self):
         def restore_combo(combo, key, default):
@@ -1230,20 +1831,20 @@ class SequencingGUI(QMainWindow):
             spin.setValue(int(self._settings.value(key, default)))
         def restore_dspin(spin, key, default):
             spin.setValue(float(self._settings.value(key, default)))
-        restore_combo(self.baseline_combo, 'baseline_method', 'Rolling Minimum')
-        restore_spin(self.bl_spin, 'baseline_window', 200)
-        restore_spin(self.bl2_spin, 'baseline_window2', 1)
-        restore_combo(self.smooth_combo, 'smooth_method', 'Savitzky-Golay')
-        restore_spin(self.sm_win_spin, 'smooth_window', 7)
-        restore_spin(self.sm_ord_spin, 'smooth_order', 2)
+        restore_combo(self.baseline_combo, 'baseline_method', 'arPLS')
+        restore_spin(self.bl_spin, 'baseline_window', 1000000)
+        restore_spin(self.bl2_spin, 'baseline_window2', 100)
+        restore_combo(self.smooth_combo, 'smooth_method', 'Butterworth')
+        restore_spin(self.sm_win_spin, 'smooth_window', 5)
+        restore_spin(self.sm_ord_spin, 'smooth_order', 9)
         self._on_smooth_method_changed(self.smooth_combo.currentText())
-        _method = self._settings.value('basecall_method', 0)
+        _method = self._settings.value('basecall_method', 1)
         try:
             self.method_combo.setCurrentIndex(int(_method))
         except (TypeError, ValueError):
             self.method_combo.setCurrentIndex(0)
         restore_dspin(self.distance_spin, 'min_distance', 4)
-        restore_spin(self.prominence_spin, 'prominence_frac', 200)
+        restore_spin(self.prominence_spin, 'prominence_frac', 75)
         restore_spin(self.ambig_spin, 'min_signal_frac', 25)
         restore_spin(self.tol_spin, 'tolerance', 4)
         restore_spin(self.fill_gap_spin, 'fill_gap', 3)
@@ -1256,7 +1857,7 @@ class SequencingGUI(QMainWindow):
         _mvcomb = self._settings.value('mv_comb_on', True)
         self.mv_comb_check.setChecked(
             _mvcomb in (True, 'true', 'True', '1', 1))
-        _fillin_val = self._settings.value('fill_in', False)
+        _fillin_val = self._settings.value('fill_in', True)
         self.fillin_check.setChecked(_fillin_val in (True, 'true', 'True', '1', 1))
         mpa = self._settings.value('matrix_apply_point', 'smoothed')
         self._set_matrix_apply_point(mpa)
@@ -1284,6 +1885,13 @@ class SequencingGUI(QMainWindow):
             _region_hybrid in (True, 'true', 'True', '1', 1))
         restore_spin(self.region_start_spin, 'region_start', 0)
         restore_spin(self.region_stop_spin, 'region_stop', 0)
+        restore_spin(self.band_low_spin, 'band_low', 0)
+        restore_spin(self.band_high_spin, 'band_high', 0)
+        restore_spin(self.band_order_spin, 'band_order', 2)
+        restore_dspin(self.ml_drop_spin, 'ml_drop', 0.50)
+        _mlhybrid = self._settings.value('ml_hybrid', False)
+        self.ml_hybrid_check.setChecked(
+            _mlhybrid in (True, 'true', 'True', '1', 1))
         self._on_region_auto_toggled(self.region_auto_check.isChecked())
 
     def closeEvent(self, event):
@@ -1297,16 +1905,16 @@ class SequencingGUI(QMainWindow):
     def _on_drag_mode_toggled(self, checked):
         if checked:
             self.status.setText('Drag mode: click a colored line on the separated plot to adjust')
-            self.drag_mode_btn.setText('✓ Drag mode')
+            self._drag_mode_act.setText('Drag mode: ON')
         else:
-            self.drag_mode_btn.setText('Drag shift lines')
+            self._drag_mode_act.setText('&Drag Shift Lines')
             self.status.setText('Drag mode off')
             if self._drag_channel is not None:
                 self._drag_channel = None
                 self._schedule_update()
 
     def _on_canvas_press(self, event):
-        if not self.drag_mode_btn.isChecked() or event.button != 1:
+        if not self._drag_mode_act.isChecked() or event.button != 1:
             return
         if event.inaxes is None:
             return
@@ -1389,6 +1997,44 @@ class SequencingGUI(QMainWindow):
     # Automated / explicit basecalling
     # ------------------------------------------------------------------
 
+    def _dll_tail_recover(self, positions, split=6000, min_sep=4, snap_r=2,
+                          apply_snap=False, enable=True):
+        """Fold-in DLL-tail recovery: replace tail positions (scan >= split)
+        with per-channel detection on the z-scored separated lanes, then
+        optionally apply the FUN_10019280 quadratic snap.
+
+        Positions are the *current* GUI grid (self._last_positions).  The
+        well's cache_sep lanes (z-scored) drive the tail detection.
+        Returns (new_positions, sequence) already sorted; falls back to the
+        original numbers when cache_sep is unavailable or enable is False.
+        """
+        if not enable or positions is None or len(positions) == 0:
+            return positions, None
+        well = getattr(self, 'current_well', None)
+        if not well:
+            well = self.well_combo.currentText().strip()
+        seps = np.array([], dtype=np.float64)
+        base = os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))          # toolkit/ -> ROLL
+        cache_dir = os.path.join(base, 'cache_sep')
+        cand = os.path.join(cache_dir, f'{well}.npy')
+        try:
+            sep = np.load(cand)
+        except OSError:
+            cand = os.path.join(base, well, 'cache_sep', f'{well}.npy')
+            try:
+                sep = np.load(cand)
+            except OSError:
+                return positions, None
+        Z = dll_tail._zs(sep)
+        merged, seq = dll_tail.dll_tail_positions(
+            np.asarray(positions, dtype=np.int64), Z,
+            split=split, min_sep=min_sep, snap_r=snap_r,
+            apply_snap=apply_snap)
+        if len(merged) == 0 and len(positions) > 0:
+            return positions, None
+        return merged, seq
+
     def _run_basecall(self):
         """Run the independent peak-call with current settings and update
         the FASTA box, plot, and status. Can be called programmatically:
@@ -1412,6 +2058,20 @@ class SequencingGUI(QMainWindow):
             # shift itself. See the note in _update_plot for why passing an
             # already-shifted trace here double-applies it.
             pos, seq, groups, ints = self._call_bases(separated, shifts, region)
+            if self.dll_tail_enabled and pos is not None and len(pos):
+                # DLL-tail recovery only on full-read calls (not per-band):
+                # trigger when the region spans most of the trace.
+                if region is not None and (region[1] - region[0]) > 3000:
+                    pos, dllseq = self._dll_tail_recover(
+                        pos, split=self.dll_tail_split,
+                        min_sep=self.dll_tail_min_sep,
+                        snap_r=self.dll_tail_snap_r,
+                        apply_snap=self.dll_tail_apply_snap)
+                    if dllseq is not None:
+                        seq = dllseq
+                        groups = [[]] * len(pos)
+                        ints = [0.0] * len(pos)
+            self._last_positions = pos
             self._manual_sequence = seq
             self._update_fasta_box(seq)
             self.status.setText(f'Basecalled {len(seq)} bases with IUPAC codes')
@@ -1482,6 +2142,31 @@ class SequencingGUI(QMainWindow):
                 self.mobility_spins[ch].setValue(int(val))
         if 'esd_offset' in settings_dict:
             self.esd_offset_spin.setValue(int(settings_dict['esd_offset']))
+        if 'esd_variant' in settings_dict:
+            idx = self.esd_combo.findText(str(settings_dict['esd_variant']))
+            if idx >= 0:
+                self.esd_combo.setCurrentIndex(idx)
+        if 'region_auto' in settings_dict:
+            self.region_auto_check.setChecked(
+                settings_dict['region_auto'] in (True, 'true', 'True', '1', 1))
+        if 'region_hybrid' in settings_dict:
+            self.region_hybrid_check.setChecked(
+                settings_dict['region_hybrid'] in (True, 'true', 'True', '1', 1))
+        if 'region_start' in settings_dict:
+            self.region_start_spin.setValue(int(settings_dict['region_start']))
+        if 'region_stop' in settings_dict:
+            self.region_stop_spin.setValue(int(settings_dict['region_stop']))
+        if 'band_low' in settings_dict:
+            self.band_low_spin.setValue(int(settings_dict['band_low']))
+        if 'band_high' in settings_dict:
+            self.band_high_spin.setValue(int(settings_dict['band_high']))
+        if 'band_order' in settings_dict:
+            self.band_order_spin.setValue(int(settings_dict['band_order']))
+        if 'ml_drop' in settings_dict:
+            self.ml_drop_spin.setValue(float(settings_dict['ml_drop']))
+        if 'ml_hybrid' in settings_dict:
+            self.ml_hybrid_check.setChecked(
+                settings_dict['ml_hybrid'] in (True, 'true', 'True', '1', 1))
         if 'reference_dna' in settings_dict:
             self.reference_dna = str(settings_dict['reference_dna'])
         if 'reference_name' in settings_dict:
@@ -1592,6 +2277,11 @@ class SequencingGUI(QMainWindow):
             'matrix': self._get_matrix().tolist(),
             'mobility_shifts': self._get_mobility_shifts(),
             'esd_offset': self.esd_offset_spin.value(),
+            'band_low': self.band_low_spin.value(),
+            'band_high': self.band_high_spin.value(),
+            'band_order': self.band_order_spin.value(),
+            'ml_drop': self.ml_drop_spin.value(),
+            'ml_hybrid': self.ml_hybrid_check.isChecked(),
             'reference_name': self.reference_name,
             'reference_start': self.reference_start,
             'reference_end': self.reference_end,
@@ -1741,8 +2431,12 @@ class SequencingGUI(QMainWindow):
             self.esd_data = parse_esd(esd_path)
             self._load_esd_traces(esd_path)
             self.x_esd = np.arange(len(self.esd_traces))
-            self.esd_offset = self._estimate_esd_offset(
-                self.esd_data.get('peak_positions'), self.esd_traces)
+            # Two distinct offsets, see _esd_label_off above:
+            #   label_off = peak_positions -> esd record (the .esd's own axis)
+            #   esd_offset (spin) = esd record -> RSD scan (what is drawn)
+            self._esd_label_off = int(self._estimate_esd_offset(
+                self.esd_data.get('peak_positions'), self.esd_traces))
+            self.esd_offset = self._estimate_esd_scan_offset(self._esd_label_off)
             self.esd_offset_spin.blockSignals(True)
             self.esd_offset_spin.setValue(int(self.esd_offset))
             self.esd_offset_spin.blockSignals(False)
@@ -1786,9 +2480,78 @@ class SequencingGUI(QMainWindow):
                 f'ESD {len(self.esd_traces)} recs, {n_peaks} peaks, '
                 f'offset~{self.esd_offset}{warning}')
             self._update_plot()
-            self.drag_mode_btn.setVisible(True)
+            self._drag_mode_act.setVisible(True)
         except Exception as e:
             self.status.setText(f'Error: {e}')
+            import traceback
+            traceback.print_exc()
+
+    def _import_abi(self):
+        """Import an ABI (.ab1) or SCF chromatogram file and display it
+        using the current DSP pipeline. Allows analyzing data from any
+        Sanger sequencer, not just MegaBACE."""
+        if not _ABI_AVAILABLE:
+            self.status.setText('ABI reader not available (abi_reader.py missing)')
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Import ABI/SCF chromatogram', '',
+            'Chromatogram files (*.ab1 *.abi *.scf);;ABI files (*.ab1 *.abi);;'
+            'SCF files (*.scf);;All Files (*)')
+        if not path:
+            return
+        try:
+            chrom = read_chromatogram(path)
+            traces, x, channel_order = abi_to_rsd_traces(chrom)
+            
+            # Store as if it were an RSD file so the existing pipeline works
+            self.rsd_raw = traces
+            self.x_rsd = x
+            self.current_well = os.path.splitext(os.path.basename(path))[0]
+            
+            # Create a synthetic ESD from the ABI base calls and peak positions
+            n_scans = len(traces)
+            seq = chrom['sequence']
+            positions = chrom['positions']
+            qualities = chrom['qualities']
+            
+            # Build synthetic ESD traces (max-channel peaks at called positions)
+            esd_traces = np.zeros((n_scans, 4), dtype=np.float64)
+            base_to_ch = {'A': 3, 'C': 2, 'G': 1, 'T': 0}
+            for i, (pos, base) in enumerate(zip(positions, seq)):
+                if pos < n_scans and base in base_to_ch:
+                    ch = base_to_ch[base]
+                    # Use trace values at peak position
+                    esd_traces[pos] = traces[pos]
+            
+            self.esd_traces = esd_traces
+            self.x_esd = np.arange(n_scans)
+            self.esd_data = {
+                'sequence': seq,
+                'peak_positions': positions,
+            }
+            self.esd_offset = 0
+            self._esd_label_off = 0
+            self.esd_offset_spin.blockSignals(True)
+            self.esd_offset_spin.setValue(0)
+            self.esd_offset_spin.blockSignals(False)
+            
+            # Store quality scores for reference
+            self._abi_qualities = qualities
+            self._abi_positions = positions
+            
+            # Update well combo to show imported file
+            self.well_combo.clear()
+            self.well_combo.addItem(self.current_well)
+            
+            sample = chrom.get('sample_name', self.current_well)
+            self.status.setText(
+                f'Imported {chrom["format"].upper()}: {sample}, '
+                f'{n_scans} scans, {len(seq)} bases, '
+                f'{len(positions)} peak positions')
+            self._update_plot()
+            self._drag_mode_act.setVisible(True)
+        except Exception as e:
+            self.status.setText(f'Import error: {e}')
             import traceback
             traceback.print_exc()
 
@@ -1827,6 +2590,63 @@ class SequencingGUI(QMainWindow):
             range(best_offset - coarse_step, best_offset + coarse_step + 1),
             key=score)
         return int(best_offset)
+
+    def _estimate_esd_scan_offset(self, label_off):
+        """Estimate the record->RSD-scan offset used to *display* the ESD
+        data (waveform + letter row) so it sits on the physical peaks.
+
+        label_off is the self-consistent ESD file offset (peak_positions ->
+        esd record) from _estimate_esd_offset. That differs from the
+        record->scan offset by a small constant because the ESD caller's
+        peak_positions carry a fixed positive scan bias relative to the
+        separated-trace apex (~+10 scans for this dataset). This method
+        measures that constant directly by anchoring each called base to
+        its own esd record and to the dominant physical peak of the same
+        channel in the separated trace.
+
+        Returns the record->scan offset (typically label_off - ~10).
+        Falls back to `label_off - 10` if the trace isn't processed yet."""
+        res = self._process()
+        if res is None:
+            return max(0, int(label_off) - 10)
+        sep = res[4]
+        if len(sep) == 0:
+            return max(0, int(label_off) - 10)
+        et = np.asarray(self.esd_traces, dtype=np.float64)
+        pp = self.esd_data.get('peak_positions')
+        seq = self.esd_data.get('sequence', '')
+        if pp is None or not seq or len(sep) < 20:
+            return max(0, int(label_off) - 10)
+        offs = []
+        n_e = len(et)
+        n_s = len(sep)
+        letters = 'TGCA'
+        for p0, b in zip(np.asarray(pp, dtype=np.int64), seq):
+            if b not in letters:
+                continue
+            ch = letters.index(b)
+            r0 = int(p0) - int(label_off)
+            best_r = None
+            for r in (r0 - 1, r0, r0 + 1):
+                if 0 <= r < n_e and int(np.argmax(et[r])) == ch:
+                    best_r = r
+                    break
+            if best_r is None:
+                continue
+            q0 = best_r + int(label_off)
+            lo, hi = max(1, q0 - 4), min(n_s - 1, q0 + 5)
+            best_q = None
+            for q in range(lo, hi + 1):
+                if int(np.argmax(sep[q])) == ch:
+                    if best_q is None or sep[q, ch] > sep[best_q, ch]:
+                        best_q = q
+            if best_q is not None:
+                offs.append(int(best_q) - int(best_r))
+            if len(offs) >= 800:
+                break
+        if not offs:
+            return max(0, int(label_off) - 10)
+        return int(np.median(offs))
 
     def _shift_channel(self, arr, shift):
         """Shift a 1-D channel trace by ``shift`` scans, padding with the
@@ -1912,6 +2732,9 @@ class SequencingGUI(QMainWindow):
             self._get_matrix(),
             self.bl2_spin.value() if self.bl2_spin else None,
             self._get_matrix_apply_point(),
+            band_low=self.band_low_spin.value() or None,
+            band_high=self.band_high_spin.value() or None,
+            band_order=self.band_order_spin.value(),
         )
 
     def _on_stage_toggled(self, checked, stage):
@@ -1983,6 +2806,11 @@ class SequencingGUI(QMainWindow):
         self.region_hybrid_check.setEnabled(auto)
         self._schedule_update()
 
+    def _on_ml_drop_changed(self):
+        """The CNN drop threshold changed; nothing render-heavy depends on it,
+        but keep the pipeline responsive for the next ML run."""
+        pass
+
     def _set_multiview_enabled(self, on):
         """Grey out the Multiview parameter panel unless that method is
         selected (the values are meaningless for the other methods)."""
@@ -1995,7 +2823,7 @@ class SequencingGUI(QMainWindow):
         method. Fires when the user switches methods (saved settings are
         restored afterwards and take precedence over these defaults)."""
         if index == 0:  # Greedy (max-intensity)
-            self.distance_spin.setValue(5)
+            self.distance_spin.setValue(4)
             self.prominence_spin.setValue(200)     # min_frac 0.20
             self.norm_window_spin.setValue(800)
         elif index == 1:  # Per-channel (cluster)
@@ -2017,6 +2845,8 @@ class SequencingGUI(QMainWindow):
         idx = self.method_combo.currentIndex()
         if idx == 2:
             return self._call_bases_cimarron()
+        if idx == 4:
+            return self._call_bases_gated_ml()
         if idx == 3:
             return mvpd.detect_multiview(
                 separated, shifts,
@@ -2090,6 +2920,49 @@ class SequencingGUI(QMainWindow):
                        zip(res.peaks, letters)]
         return positions, seq, base_groups, intensities
 
+    _gated_ml_cache = None   # (plate_dir, set-of-train-wells)
+
+    def _call_bases_gated_ml(self):
+        """Run the 'Segmented+ML (gated)' independent basecall: train per-
+        segment RandomForest confidence models on the plate's OTHER wells
+        (cached per plate), compute a per-scan ML confidence curve for the
+        current well, and run track_bases_segmented gated by that confidence
+        (ml_min_confidence=0.10, the cross-validated optimum that raised M13
+        identity ~+1.3 -- see PROJECT_HISTORY 2026-09-02). Returns the GUI
+        (positions, sequence, base_groups, intensities) contract.
+
+        Training is done once per plate (not per slider move) and cached, so
+        selecting this method only re-calls the current well, not retrain."""
+        import segment_ml as _sml
+        if self.rsd_raw is None:
+            return (np.array([], dtype=np.int64), '', [], [])
+        well = self.current_well or ''
+        # segment_ml resolves both test and training wells in its own RSD_DIR
+        # (the plate folder next to the script), so enumerate the compatible
+        # well names there rather than the GUI's configurable data_dir.
+        plate_dir = os.path.join(
+            os.path.dirname(os.path.abspath(_sml.__file__)), 'MB1000_M13_DT')
+        # Cache training (plate-level) so the live-preview slider loop stays
+        # responsive; refresh when the plate or well set changes.
+        if (self._gated_ml_cache is None
+                or self._gated_ml_cache[0] != plate_dir):
+            train_wells = sorted(f[:-4] for f in os.listdir(plate_dir)
+                                 if f.endswith('.rsd') and f[:-4] != well)
+            self._gated_ml_cache = (plate_dir, tuple(train_wells))
+        _, train_wells = self._gated_ml_cache
+        try:
+            s, _q, b, _conf = _sml.gated_call(
+                well, list(train_wells), ml_min_confidence=0.10,
+                verbose=False)
+        except Exception as e:
+            self.status.setText(f'Gated ML call error: {e}')
+            return (np.array([], dtype=np.int64), '', [], [])
+        order = 'TGCA'
+        positions = np.array([bb.position for bb in b], dtype=np.int64)
+        base_groups = [(None, bb.channel) for bb in b]
+        intensities = [{order[bb.channel]: float(bb.height)} for bb in b]
+        return positions, s, base_groups, intensities
+
     def _get_region(self, separated):
         """Return the (start, stop) scan window that confines
         normalization + basecalling to the real signal.
@@ -2157,6 +3030,12 @@ class SequencingGUI(QMainWindow):
     def _update_plot(self):
         if self.rsd_raw is None or self.esd_traces is None:
             return
+        try:
+            self._update_plot_inner()
+        except Exception as e:
+            self.status.setText(f'Plot error: {e}')
+
+    def _update_plot_inner(self):
         result = self._process()
         if result is None:
             return
@@ -2165,17 +3044,25 @@ class SequencingGUI(QMainWindow):
         raw, bl, corr, sm, separated, mix = result
         self._last_separated = separated
         self.fig.clear()
-        ax1 = self.fig.add_subplot(4, 1, 1)
-        ax2 = self.fig.add_subplot(4, 1, 2, sharex=ax1)
-        ax3 = self.fig.add_subplot(4, 1, 3, sharex=ax1)
-        ax4 = self.fig.add_subplot(4, 1, 4, sharex=ax1)
+        n_panels = 5 if self._qscore_act.isChecked() else 4
+        ax1 = self.fig.add_subplot(n_panels, 1, 1)
+        ax2 = self.fig.add_subplot(n_panels, 1, 2, sharex=ax1)
+        ax3 = self.fig.add_subplot(n_panels, 1, 3, sharex=ax1)
+        ax4 = self.fig.add_subplot(n_panels, 1, 4, sharex=ax1)
+        ax5 = self.fig.add_subplot(n_panels, 1, 5, sharex=ax1) if n_panels == 5 else None
         apply_point = self._get_matrix_apply_point()
         # Panels keep their stage meaning on every matrix-stage switch, but
         # the separated panel's y-scale changes ('none' passes raw counts
-        # through, else 0-1 normalized), so reset saved limits on stage
+        # through, else 0-1 normalized), so reset saved y-limits on stage
         # changes to avoid a "blank" or "jumping" plot.
+        # Preserve x-limits (zoom/pan) across stage changes — clearing
+        # everything here causes all panels (including ESD) to snap back
+        # to full extent, which makes the ESD display appear to shift.
         if apply_point != getattr(self, '_last_apply_point', None):
-            self._saved_lims = {}
+            for i, entry in self._saved_lims.items():
+                if 'ylim' in entry:
+                    del entry['ylim']
+                entry['y_autoscale'] = True
         self._last_apply_point = apply_point
 
         # Mobility shifts are applied only just before basecalling/peak
@@ -2253,7 +3140,6 @@ class SequencingGUI(QMainWindow):
         ax4.set_ylabel('ESD traces (MegaBACE)', fontsize=8)
         ax4.set_xlabel('Scan / Record index (aligned)', fontsize=8)
         ax4.tick_params(labelsize=7)
-        ax4.legend(fontsize=5, ncol=4, loc='upper right')
         if esd_offset:
             ax4.text(0.01, 0.95,
                      f'ESD trace shifted +{esd_offset} to align under labels',
@@ -2277,9 +3163,17 @@ class SequencingGUI(QMainWindow):
             tick_segs, tick_cols = [], []
             peaks_arr = np.asarray(peaks, dtype=np.int64)
             n_dropped = 0
+            revcomp_mode = self._revcomp_act.isChecked()
+            esd_seq = seq if seq else ''
             for idx in range(len(peaks_arr)):
                 p = int(peaks_arr[idx])
-                native_guess = p - esd_offset
+                # ESD's own internal axis: which esd record was this base
+                # called on? peak_positions carry a fixed bias relative to
+                # the physical (separated-trace) peaks, so this uses the
+                # self-consistent label_off (p -> record), NOT the
+                # user-facing display offset. Mixing them up pinned every
+                # label at p regardless of the esd_offset spin.
+                native_guess = p - self._esd_label_off
                 # Clamp rather than skip: a peak that lands just outside
                 # [0, n_esd_recs) after offset correction (typically the
                 # first/last couple of calls) still gets a label at the
@@ -2318,11 +3212,21 @@ class SequencingGUI(QMainWindow):
                 # short hairline under its letter, colored by winning channel
                 vx.append(x_disp)
                 vcol.append(color)
-                ax4.text(x_disp, band_y, base, transform=ax4.get_xaxis_transform(),
-                         fontsize=6, ha='center', va='center', color='black',
-                         fontweight='bold', clip_on=True,
-                         bbox=dict(facecolor=color, alpha=0.35, pad=0.2,
-                                   edgecolor='none'))
+                # Apply reverse complement to ESD labels if toggle is on
+                if revcomp_mode and 0 <= idx < len(esd_seq):
+                    rc_base = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}.get(
+                        esd_seq[idx], esd_seq[idx])
+                    ax4.text(x_disp, band_y, rc_base, transform=ax4.get_xaxis_transform(),
+                             fontsize=6, ha='center', va='center', color='black',
+                             fontweight='bold', clip_on=True,
+                             bbox=dict(facecolor=color, alpha=0.35, pad=0.2,
+                                       edgecolor='none'))
+                else:
+                    ax4.text(x_disp, band_y, base, transform=ax4.get_xaxis_transform(),
+                             fontsize=6, ha='center', va='center', color='black',
+                             fontweight='bold', clip_on=True,
+                             bbox=dict(facecolor=color, alpha=0.35, pad=0.2,
+                                       edgecolor='none'))
                 # tiny quality tick pinned above: flat = confident call
                 if dom_ch >= 0 and trace[dom_ch] > 0:
                     conf = float(np.clip(
@@ -2381,35 +3285,24 @@ class SequencingGUI(QMainWindow):
                 pos, iupac_seq, base_groups, intens = self._call_bases(
                     separated, shifts, region)
                 # Fill-in: re-run peak detection on the combined envelope and
-                # add clean positions the per-channel merge dropped (e.g. the
-                # G next to a taller T only 3 scans away), or - for the
-                # greedy caller - recover shoulder bases whose apex the
-                # +/-Distance excision blanked (e.g. a clean C hiding on a
-                # taller neighbor's flank). Drawn in orange so you can see
-                # exactly which bases the fill-in added.
+                # add clean positions the cluster-merge dropped (e.g. the G
+                # next to a taller T only 3 scans away). Drawn in orange so
+                # you can see exactly which bases the fill-in added. Only
+                # relevant for the per-channel cluster method - the greedy
+                # caller already resolves tight peaks.
                 fillin_pos = []
-                fillin_add = None
-                if self.fillin_check.isChecked():
-                    if self.method_combo.currentIndex() == 1:
-                        fillin_add = pc_fill_in_combined_peaks(
-                            separated, shifts,
-                            positions=[int(p) for p in pos],
-                            min_distance=max(1, self.distance_spin.value()),
-                            prominence_frac=self.prominence_spin.value() / 1000.0,
-                            norm_window=max(1, self.norm_window_spin.value()),
-                            fill_gap=max(1, self.fill_gap_spin.value()),
-                            fill_margin=self.fill_margin_spin.value() / 100.0,
-                            region=region,
-                        )
-                    elif self.method_combo.currentIndex() == 0:
-                        fillin_add = pc_fill_in_shoulders(
-                            separated, shifts,
-                            positions=[int(p) for p in pos],
-                            norm_window=max(1, self.norm_window_spin.value()),
-                            fill_gap=max(1, self.fill_gap_spin.value()),
-                            fill_margin=self.fill_margin_spin.value() / 100.0,
-                            region=region,
-                        )
+                if (self.method_combo.currentIndex() == 1
+                        and self.fillin_check.isChecked()):
+                    fillin_add = pc_fill_in_combined_peaks(
+                        separated, shifts,
+                        positions=[int(p) for p in pos],
+                        min_distance=max(1, self.distance_spin.value()),
+                        prominence_frac=self.prominence_spin.value() / 1000.0,
+                        norm_window=max(1, self.norm_window_spin.value()),
+                        fill_gap=max(1, self.fill_gap_spin.value()),
+                        fill_margin=self.fill_margin_spin.value() / 100.0,
+                        region=region,
+                    )
                     if fillin_add:
                         merged = sorted(
                             [(int(p), letter) for p, letter in zip(pos, iupac_seq)]
@@ -2418,6 +3311,20 @@ class SequencingGUI(QMainWindow):
                         iupac_seq = ''.join(t[1] for t in merged)
                         fillin_pos = [int(t[0]) for t in fillin_add]
                 fillin_set = set(fillin_pos)
+                if pos is not None and len(pos) and self.dll_tail_enabled \
+                        and region is not None and (region[1] - region[0]) > 3000:
+                    pos_t, dllseq = self._dll_tail_recover(
+                        np.asarray(pos, dtype=np.int64),
+                        split=self.dll_tail_split,
+                        min_sep=self.dll_tail_min_sep,
+                        snap_r=self.dll_tail_snap_r,
+                        apply_snap=self.dll_tail_apply_snap)
+                    if dllseq is not None and len(dllseq) == len(pos_t):
+                        pos = pos_t
+                        iupac_seq = dllseq
+                        fillin_set = set()
+                self._last_positions = (np.asarray(pos, dtype=np.int64).copy()
+                                        if pos is not None else None)
                 # Bases sit in one flat row near the top of the plot,
                 # rather than riding up and down with each peak's own
                 # height - easier to read as a continuous sequence.
@@ -2512,7 +3419,7 @@ class SequencingGUI(QMainWindow):
         # Both now report matched-bases / reference-length (see
         # pc_reference_accuracy).
         self.fig.subplots_adjust(hspace=0.08, left=0.14, right=0.98,
-                                 top=0.97, bottom=0.08)
+                                 top=0.97, bottom=0.08 if n_panels == 4 else 0.06)
         if esd_txt is not None:
             self._esd_metric_label.setText(esd_txt)
             self._esd_metric_label.setVisible(True)
@@ -2523,13 +3430,83 @@ class SequencingGUI(QMainWindow):
             self._indep_metric_label.setVisible(True)
         else:
             self._indep_metric_label.setVisible(False)
-        self._restore_limits([ax1, ax2, ax3, ax4])
+        # CNN Q-score metric: show when we have a basecall + raw trace
+        if (self.rsd_raw is not None and iupac_seq and len(iupac_seq) > 10
+                and _CNN_AVAILABLE and hasattr(self, '_last_positions')
+                and self._last_positions is not None and len(self._last_positions) > 0):
+            try:
+                cnn_est = _get_cnn()
+                pmax = cnn_est.predict_pmax(self.rsd_raw, self._last_positions)
+                q_scores = cnn_est.phred(pmax)
+                mean_q = float(q_scores.mean())
+                q20 = 100.0 * np.sum(q_scores >= 20) / max(1, len(q_scores))
+                q30 = 100.0 * np.sum(q_scores >= 30) / max(1, len(q_scores))
+                self._qual_metric_label.setText(
+                    f'Q-score: mean={mean_q:.1f} Q20={q20:.0f}% Q30={q30:.0f}%')
+                self._qual_metric_label.setVisible(True)
+            except Exception:
+                self._qual_metric_label.setVisible(False)
+        else:
+            self._qual_metric_label.setVisible(False)
+        # M13 BLAST-style identity: affine-gap local alignment vs M13 reference
+        if iupac_seq and len(iupac_seq) > 10:
+            blast_ref = getattr(self, 'reference_dna', '')
+            if not blast_ref:
+                try:
+                    from simple_align import M13_REFERENCE
+                    blast_ref = M13_REFERENCE
+                except ImportError:
+                    blast_ref = ''
+            if blast_ref:
+                q_clean = ''.join(c for c in iupac_seq if c in 'ACGT')
+                fwd = ref_local_identity(q_clean, blast_ref)
+                rev = ref_local_identity(_ref_revcomp(q_clean), blast_ref)
+                best = rev if rev[5] >= fwd[5] else fwd
+                ident, mm, mism, ind, aligned = best[:5]
+                orient = 'rev' if rev[5] >= fwd[5] else 'fwd'
+                self._m13_blast_label.setText(
+                    f'M13 BLAST: {ident:.1f}% ({mm}m/{mism}mm/{ind}ind, {orient})')
+                self._m13_blast_label.setVisible(True)
+            else:
+                self._m13_blast_label.setVisible(False)
+        else:
+            self._m13_blast_label.setVisible(False)
+        # Per-base Q-score bar subplot (ax5)
+        all_axes = [ax1, ax2, ax3, ax4]
+        if ax5 is not None:
+            all_axes.append(ax5)
+            ax5.set_ylabel('Q-score', fontsize=8)
+            ax5.set_ylim(0, 50)
+            ax5.axhline(20, color='orange', linewidth=0.5, linestyle='--', alpha=0.5)
+            ax5.axhline(30, color='green', linewidth=0.5, linestyle='--', alpha=0.5)
+            if (self.rsd_raw is not None and hasattr(self, '_last_positions')
+                    and self._last_positions is not None and len(self._last_positions) > 0):
+                try:
+                    cnn_est = _get_cnn() if _CNN_AVAILABLE else None
+                    if cnn_est is not None:
+                        pmax = cnn_est.predict_pmax(self.rsd_raw, self._last_positions)
+                        q_scores = cnn_est.phred(pmax)
+                        positions = self._last_positions[:len(q_scores)]
+                        for pos, q in zip(positions, q_scores):
+                            if q >= 30:
+                                color = '#2ecc71'
+                            elif q >= 20:
+                                color = '#f39c12'
+                            else:
+                                color = '#e74c3c'
+                            ax5.bar(int(pos), float(q), width=1.0, color=color, alpha=0.8)
+                except Exception:
+                    pass
+            ax5.set_xlabel('Scan / Record index (aligned)', fontsize=8)
+        self._restore_limits(all_axes)
         for ax in [ax1, ax2, ax3]:
             ax.set_xlabel('')
+        if ax5 is not None:
+            ax4.set_xlabel('')
         ax4.set_xlabel('Scan / Record index (aligned)', fontsize=8)
-        if self.drag_mode_btn.isChecked():
+        if self._drag_mode_act.isChecked():
             self._draw_shift_lines(ax3)
-            self.drag_mode_btn.setVisible(True)
+            self._drag_mode_act.setVisible(True)
         else:
             self._shift_lines.clear()
         self.canvas.draw()
@@ -2557,133 +3534,150 @@ class SequencingGUI(QMainWindow):
                 'baseline_window': self.bl_spin.value(),
                 'baseline_window2': self.bl2_spin.value(),
                 'smooth_window': self.sm_win_spin.value(),
-'smooth_order': self.sm_ord_spin.value(),
-            'min_distance': self.distance_spin.value(),
-            'prominence_frac': self.prominence_spin.value() / 1000.0,
-            'min_signal_frac': self.ambig_spin.value() / 100.0,
+                'smooth_order': self.sm_ord_spin.value(),
+                'min_distance': self.distance_spin.value(),
+                'prominence_frac': self.prominence_spin.value() / 1000.0,
+                'min_signal_frac': self.ambig_spin.value() / 100.0,
                 'mobility_shifts': [sp.value() for sp in self.mobility_spins],
                 'condition': float(np.linalg.cond(mix)),
             }, f, indent=2)
         self.status.setText(f'Saved to {dir_path}')
 
     def _run_ml(self):
-        """ML basecalling: feeds raw (unseparated) RSD trace patches centered
-        at ESD peak positions through the trained CNN model.
+        """V4 CNN ensemble basecalling on Cimarron 3.12 peak positions.
 
-        The model was trained on raw 4-channel patches at ESD-aligned peaks,
-        so it implicitly handles spectral unmixing — no baseline correction,
-        smoothing, or matrix inversion needed. This is why it achieves
-        ~98% vs ESD (vs ~30% for naive argmax on separated traces).
-
-        Also evaluates against the M13 reference (the true ground truth),
-        since ESD itself only matches M13 at ~92%."""
+        Uses the real Cimarron 3.12 ESD peak positions (from the Cp312
+        variant) combined with the V4 CNN ensemble for base classification.
+        Best of both worlds: Cimarron finds the peaks, CNN reads them."""
         if self.current_well is None:
             self.status.setText('Load a well first')
             return
         self.progress.setVisible(True)
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.status.setText('Running ML basecalling...')
+        self.progress.setRange(0, 0)
+        self.status.setText('Running V4 CNN + Cimarron peaks...')
         QApplication.processEvents()
 
-        from basecaller import _load_ml_model, ML_LABELS
-        model = _load_ml_model()
-        window = 15
+        try:
+            import sys as _sys
+            _denovo_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       '..', '02_denovo_cnn_ensemble_91.53pct')
+            if _denovo_dir not in _sys.path:
+                _sys.path.insert(0, _denovo_dir)
+            import tensorflow as tf
+            import perfect_basecaller as pb
 
-        # Read raw RSD trace (NOT the processed/separated trace)
-        well = self.current_well
-        rsd_path = os.path.join(self.data_dir, f'{well}.rsd')
-        df = parse_rsd(rsd_path)
-        raw = df[['Channel1', 'Channel2', 'Channel3',
-                  'Channel4']].values.astype(np.float32)
+            well = self.current_well
 
-        # ESD data for evaluation
-        esd_path = os.path.join(self.data_dir,
-                                self.esd_combo.currentData() or '',
-                                f'{well}.esd')
-        esd_data = parse_esd(esd_path)
-        positions = esd_data.get('peak_positions')
-        seq = esd_data.get('sequence', '')
-        if positions is None or not seq:
-            self.status.setText('No ESD peaks to evaluate')
-            self.progress.setVisible(False)
-            return
+            # 1) Get Cimarron 3.12 peak positions from ESD
+            esd_path = os.path.join(self.data_dir,
+                                    self.esd_combo.currentData() or '',
+                                    f'{well}.esd')
+            esd_data = parse_esd(esd_path)
+            cim_positions = esd_data.get('peak_positions')
+            esd_seq = ''.join(c for c in esd_data.get('sequence', '')
+                              if c in 'ACGTN')
+            if cim_positions is None or len(cim_positions) == 0:
+                self.status.setText('No Cimarron peaks in ESD')
+                self.progress.setRange(0, 100)
+                return
+            cim_positions = np.asarray(cim_positions, dtype=np.int64)
 
-        n_scans = len(raw)
-        # Clamp positions to valid range for patch extraction
-        valid = np.where((positions >= window) &
-                         (positions < n_scans - window))[0]
-        valid_positions = positions[valid]
+            # 2) Load raw RSD trace
+            rsd_path = os.path.join(self.data_dir, f'{well}.rsd')
+            df = parse_rsd(rsd_path)
+            raw = df[['Channel1', 'Channel2', 'Channel3',
+                      'Channel4']].values.astype(np.float64)
+            chw = raw
+            if chw.ndim == 2 and chw.shape[0] == 4 and chw.shape[0] <= chw.shape[1]:
+                chw = chw.T
 
-        self.progress.setValue(20)
-        QApplication.processEvents()
+            # 3) Load V4 CNN ensemble
+            HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '02_denovo_cnn_ensemble_91.53pct')
+            v4_files = ['base_caller_model_v4_clean.keras',
+                        'base_caller_model_v4_pos.keras',
+                        'base_caller_model_v4_pos_b.keras']
+            models = [tf.keras.models.load_model(
+                os.path.join(HERE, f), compile=False) for f in v4_files]
 
-        # Build batch of normalized patches
-        X = np.array([raw[int(p) - window:int(p) + window + 1]
-                      for p in valid_positions], dtype=np.float32)
-        X_mean = X.mean(axis=(1,), keepdims=True)
-        X_std = X.std(axis=(1,), keepdims=True) + 1e-8
-        X = (X - X_mean) / X_std
+            # 4) Build CNN windows at Cimarron positions and predict
+            LABELS = 'ACGT'
+            probs_sum = np.zeros((len(cim_positions), 4), dtype=np.float64)
+            for m in models:
+                inp_ch = m.input_shape[-1] if m.input_shape[-1] else 4
+                window = (m.input_shape[1] - 1) // 2 if m.input_shape[1] else 15
+                X4 = pb._build_window(chw, cim_positions, window)
+                if inp_ch == 5:
+                    scans_arr = np.asarray(cim_positions, dtype=np.float32)
+                    s_min, s_max = scans_arr.min(), scans_arr.max()
+                    s_range = max(1.0, s_max - s_min)
+                    pos_frac = ((scans_arr - s_min) / s_range).astype(np.float32)
+                    W = X4.shape[1]
+                    pos_ch = pos_frac[:, np.newaxis, np.newaxis] * np.ones(
+                        (len(X4), W, 1), dtype=np.float32)
+                    inp = np.concatenate([X4, pos_ch], axis=2)
+                else:
+                    inp = X4
+                p = m.predict(inp, verbose=0)
+                if p.shape[1] == 5:
+                    p = p[:, :4]
+                probs_sum += p
+            probs = probs_sum / len(models)
+            pred = probs.argmax(1)
+            pmax = probs.max(1)
+            conf = np.array([min(60, max(1, int(round(-10 * np.log10(
+                max(1e-6, 1 - pm)))))) for pm in pmax], dtype=np.int32)
 
-        self.progress.setValue(40)
-        QApplication.processEvents()
+            # 5) Apply CNN confidence dropout / optional ESD hybrid.
+            # By default, peaks below the drop threshold are removed from the
+            # call (emitting 'N'), which deletes the spurious insertions that
+            # otherwise fragment the BLAST hit and lowers coverage. This is
+            # what lets the ML read reach DLL-grade coverage.
+            esd_bases = esd_data.get('sequence', '')
+            drop = float(self.ml_drop_spin.value())
+            hybrid = self.ml_hybrid_check.isChecked()
+            HYBRID_THRESHOLD = 0.70
+            bases = []
+            for i, (cnn_base_idx, pm) in enumerate(zip(pred, pmax)):
+                if pm < drop:
+                    if hybrid and i < len(esd_bases) and esd_bases[i] in LABELS:
+                        bases.append(esd_bases[i])
+                    else:
+                        bases.append('N')
+                elif hybrid and pm < HYBRID_THRESHOLD and i < len(esd_bases):
+                    esd_b = esd_bases[i]
+                    bases.append(esd_b if esd_b in LABELS else LABELS[cnn_base_idx])
+                else:
+                    bases.append(LABELS[cnn_base_idx])
+            called = ''.join(bases)
 
-        preds = model.predict(X, verbose=0)
-        pred_classes = preds.argmax(axis=1)
-        pred_probs = preds.max(axis=1)
+            self._ml_called = called
+            self._ml_quals = conf
+            self._ml_positions = cim_positions
+            self._ml_raw_seq = called
 
-        self.progress.setValue(70)
-        QApplication.processEvents()
+            # 5) Evaluate vs ESD and M13
+            esd_identity = pb.perbase_vs_ref(called, esd_seq) if esd_seq else 0
+            m13_result = self._align_to_m13(called)
+            m13_identity = m13_result.get('identity', 0) if m13_result else 0
 
-        # Assemble called sequence at ESD positions
-        esd_seq_valid = ''.join(seq[i] for i in valid if i < len(seq))
-        bases = []
-        quals = []
-        for cls, prob in zip(pred_classes, pred_probs):
-            base = ML_LABELS[cls]
-            qual = int(round(prob * 100))
-            if qual < 20:
-                base = 'N'
-            bases.append(base)
-            quals.append(qual)
-        called = ''.join(bases)
-        self._ml_called = called
-        self._ml_quals = np.array(quals, dtype=np.int32)
-        self._ml_positions = valid_positions
-        self._ml_raw_seq = esd_seq_valid
-
-        # Identity vs ESD: full global (Needleman-Wunsch) alignment instead of
-        # the circular position-indexed match so known small ESD base errors
-        # don't drag the score down - the fair comparison against a second
-        # caller is alignment identity, same as the M13 metric. N bases are
-        # kept (they are real mismatches to ESD, unlike align_to_m13 which
-        # strips them).
-        from peak_calling import nw_identity as _nw_esd
-        esd_identity = _nw_esd(called, esd_seq_valid, max_len=20000)
-
-        # Identity vs M13 (true ground truth)
-        from simple_align import M13_REFERENCE
-        q = ''.join(c for c in bases if c in 'ACGT')
-        m13_result = self._align_to_m13(q)
-        m13_identity = m13_result.get('identity', 0) if m13_result else 0
-
-        # Quality distribution
-        conf_called = [p for b, p in zip(bases, pred_probs) if b != 'N']
-        if conf_called:
-            avg_conf = np.mean(conf_called) * 100
-        else:
-            avg_conf = 0
-
-        non_n = sum(1 for b in bases if b != 'N')
-        self.progress.setValue(100)
-        self._ml_esd_identity = esd_identity
-        self._ml_m13_identity = m13_identity
-        self.status.setText(
-            f'ML basecall: {non_n}/{len(bases)} called (avg conf {avg_conf:.0f}%). '
-            f'vs ESD={esd_identity:.1f}%, vs M13={m13_identity:.1f}%'
-            f' - use "Export ML FASTA" to save it')
-        self.ml_fasta_btn.setEnabled(True)
-        QTimer.singleShot(4000, lambda: self.progress.setVisible(False))
+            non_n = sum(1 for b in called if b in 'ACGT')
+            self.progress.setRange(0, 100)
+            self.progress.setValue(100)
+            self._ml_esd_identity = esd_identity
+            self._ml_m13_identity = m13_identity
+            self._update_fasta_box(called)
+            self.status.setText(
+                f'V4 CNN + Cimarron peaks: {non_n} bases '
+                f'(drop<{drop:.2f}), vs ESD={esd_identity:.1f}%, '
+                f'vs M13={m13_identity:.1f}%')
+            self._export_ml_act.setEnabled(True)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.progress.setRange(0, 100)
+            self.status.setText(f'V4 CNN error: {e}')
+        QTimer.singleShot(2000, lambda: self.progress.setVisible(False))
 
     def _export_ml_fasta(self):
         """Write the stored ML basecall to a FASTA file plus a comparison
@@ -2749,70 +3743,13 @@ class SequencingGUI(QMainWindow):
         q = ''.join(c for c in query if c in 'ACGT')
         if len(q) < 20:
             return None
-        m, n = len(q), len(ref)
-        dp = np.zeros((m + 1, n + 1), dtype=np.int32)
-        dp[:, 0] = np.arange(m + 1) * -2
-        dp[0, :] = np.arange(n + 1) * -2
-        for i in range(1, m + 1):
-            for j in range(1, n + 1):
-                diag = dp[i - 1, j - 1] + (1 if q[i - 1] == ref[j - 1] else -1)
-                up = dp[i - 1, j] + -2
-                left = dp[i, j - 1] + -2
-                dp[i, j] = max(diag, up, left)
-        i, j = m, n
-        matches = 0
-        aligned = 0
-        while i > 0 or j > 0:
-            if i > 0 and j > 0 and dp[i, j] == dp[i - 1, j - 1] + \
-                    (1 if q[i - 1] == ref[j - 1] else -1):
-                aligned += 1
-                if q[i - 1] == ref[j - 1]:
-                    matches += 1
-                i -= 1
-                j -= 1
-            elif i > 0 and dp[i, j] == dp[i - 1, j] + -2:
-                aligned += 1
-                i -= 1
-            else:
-                aligned += 1
-                j -= 1
+        # Use the vectorized NW from align.py
+        identity = pc_nw_identity(q, ref, max_len=20000)
         return {
-            'matches': matches,
-            'alignment_length': aligned,
-            'identity': matches / aligned * 100 if aligned else 0,
-        } if aligned else None
-
-    def _nw_identity(self, q, r, match=1, mismatch=-1, gap=-2):
-        m, n = len(q), len(r)
-        dp = [[0] * (n + 1) for _ in range(m + 1)]
-        for i in range(1, m + 1):
-            dp[i][0] = dp[i-1][0] + gap
-        for j in range(1, n + 1):
-            dp[0][j] = dp[0][j-1] + gap
-        for i in range(1, m + 1):
-            for j in range(1, n + 1):
-                diag = dp[i-1][j-1] + (match if q[i-1] == r[j-1] else mismatch)
-                up = dp[i-1][j] + gap
-                left = dp[i][j-1] + gap
-                dp[i][j] = max(diag, up, left)
-        i, j = m, n
-        matches = 0
-        aligned = 0
-        while i > 0 or j > 0:
-            if i > 0 and j > 0 and dp[i][j] == dp[i-1][j-1] + \
-                    (match if q[i-1] == r[j-1] else mismatch):
-                aligned += 1
-                if q[i-1] == r[j-1]:
-                    matches += 1
-                i -= 1
-                j -= 1
-            elif i > 0 and dp[i][j] == dp[i-1][j] + gap:
-                aligned += 1
-                i -= 1
-            else:
-                aligned += 1
-                j -= 1
-        return 100.0 * matches / aligned if aligned else 0.0
+            'identity': identity,
+            'matches': int(round(identity * len(q) / 100)),
+            'alignment_length': len(q),
+        }
 
     def _run_independent_peakcall(self):
         """Run a real peak detector on the shifted separated trace (no ESD peak
@@ -2842,6 +3779,12 @@ class SequencingGUI(QMainWindow):
 
     def _open_reference_dialog(self):
         ReferenceDialog(self).exec_()
+
+    def _open_blast_report(self):
+        BlastReportDialog(self).exec_()
+
+    def _open_batch_m13(self):
+        BatchM13Dialog(self).exec_()
 
     def _run_auto_mobility(self):
         """Peak-coincidence mobility shift estimate (see
@@ -2891,10 +3834,10 @@ class SequencingGUI(QMainWindow):
         self.progress.setValue(-1)
         self.opt_log.clear()
         self.opt_log.show()
-        self.cancel_opt_btn.setVisible(True)
+        self._cancel_opt_act.setVisible(True)
         self._disable_controls()
 
-        overnight = self.overnight_cb.isChecked()
+        overnight = self._overnight_act.isChecked()
         if overnight:
             wells_arg = 'all'
             maxiter = 400
@@ -2940,7 +3883,7 @@ class SequencingGUI(QMainWindow):
         if self._opt_worker and self._opt_worker.isRunning():
             self._opt_worker.cancel()
             self.status.setText('Cancelling optimizer...')
-        self.cancel_opt_btn.setVisible(False)
+        self._cancel_opt_act.setVisible(False)
 
     def _on_optimizer_stdout(self, line):
         """Stream optimizer progress lines to the log window."""
@@ -2951,21 +3894,21 @@ class SequencingGUI(QMainWindow):
 
     def _disable_controls(self):
         for w in [self.well_combo, self.esd_combo, self.load_btn,
-                  self.save_btn, self.ml_btn, self.peakcall_btn,
-                  self.mobility_btn, self.optimize_btn]:
+                  self._save_data_act, self._ml_act, self._peakcall_act,
+                  self._mobility_act, self._optimize_act]:
             w.setEnabled(False)
 
     def _enable_controls(self):
         for w in [self.well_combo, self.esd_combo, self.load_btn,
-                  self.save_btn, self.ml_btn, self.peakcall_btn,
-                  self.mobility_btn, self.optimize_btn]:
+                  self._save_data_act, self._ml_act, self._peakcall_act,
+                  self._mobility_act, self._optimize_act]:
             w.setEnabled(True)
 
     def _on_optimizer_finished(self, result):
         """Handle the OptimizerWorker.finished signal."""
         self.progress.setRange(0, 100)
         self.progress.setVisible(False)
-        self.cancel_opt_btn.setVisible(False)
+        self._cancel_opt_act.setVisible(False)
         self.opt_log.hide()
         self._enable_controls()
 
@@ -3035,17 +3978,139 @@ class SequencingGUI(QMainWindow):
         except Exception as e:
             self.opt_log.append(f'Could not save best settings: {e}')
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_R:
-            self._reset_view()
-        elif event.key() == Qt.Key_L:
+    def _open_batch_dialog(self):
+        """Open the batch processing dialog for the current data folder."""
+        if not self.data_dir or not os.path.isdir(self.data_dir):
+            self.status.setText('Select a valid data folder first')
+            return
+        shifts = self._effective_shifts()
+        method = self.method_combo.currentIndex()
+        esd_subdir = self.esd_combo.currentData() or None
+        dlg = BatchDialog(
+            self.data_dir, esd_subdir=esd_subdir,
+            shifts=shifts, method=method, parent=self,
+        )
+        dlg.well_selected.connect(self._load_well_by_name)
+        dlg.exec_()
+
+    def _load_well_by_name(self, well):
+        """Load a specific well by name (e.g. 'A01') into the GUI."""
+        idx = self.well_combo.findText(well)
+        if idx >= 0:
+            self.well_combo.setCurrentIndex(idx)
             self._load_data()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
+        if key == Qt.Key_R:
+            self._reset_view()
+        elif key == Qt.Key_L:
+            self._load_data()
+        elif key == Qt.Key_Space:
+            self._load_next_well(delta=1)
+        elif key == Qt.Key_Backspace:
+            self._load_next_well(delta=-1)
+        elif key == Qt.Key_Left:
+            self._scroll_x(delta=-100)
+        elif key == Qt.Key_Right:
+            self._scroll_x(delta=100)
+        elif key == Qt.Key_Up:
+            self._scroll_x(delta=-20)
+        elif key == Qt.Key_Down:
+            self._scroll_x(delta=20)
+        elif key == Qt.Key_F and mods == Qt.ControlModifier:
+            self._reset_view()
+        elif key == Qt.Key_S and mods == Qt.ControlModifier:
+            self._save_fasta()
+        elif key == Qt.Key_O and mods == Qt.ControlModifier:
+            self._load_settings_from_file()
+        elif key == Qt.Key_C and mods == Qt.ControlModifier:
+            self._copy_fasta()
+        elif key == Qt.Key_E and mods == Qt.ControlModifier:
+            self._save_data()
+        elif key == Qt.Key_G:
+            self._revcomp_act.toggle()
+        elif key == Qt.Key_Q:
+            self._qscore_act.toggle()
+        else:
+            super().keyPressEvent(event)
+
+    def _load_next_well(self, delta=1):
+        """Load the next or previous well in the combo box list."""
+        idx = self.well_combo.currentIndex()
+        n = self.well_combo.count()
+        if n == 0:
+            return
+        new_idx = (idx + delta) % n
+        self.well_combo.setCurrentIndex(new_idx)
+        self._load_data()
+
+    def _scroll_x(self, delta=100):
+        """Scroll all subplots horizontally by delta scan units."""
+        if not self.fig.axes:
+            return
+        xlim = self.fig.axes[0].get_xlim()
+        lo, hi = xlim
+        n_scans = len(self.rsd_raw) if self.rsd_raw is not None else 1
+        new_lo = max(0, lo + delta)
+        new_hi = min(n_scans, hi + delta)
+        if new_lo == lo:
+            return
+        for ax in self.fig.axes:
+            ax.set_xlim(new_lo, new_hi)
+        self.canvas.draw_idle()
 
     def _reset_view(self):
         self._saved_lims = {}
         for ax in self.fig.axes:
             ax.autoscale(True)
         self.canvas.draw()
+
+    def _update_fasta_box(self, sequence):
+        if not sequence:
+            self._fasta_box.setText('')
+            return
+        well = self.current_well or 'unknown'
+        display_seq = sequence
+        suffix = ''
+        if self._revcomp_act.isChecked():
+            display_seq = _ref_revcomp(sequence)
+            suffix = ' (rev-comp)'
+        header = f'>{well}_manual{suffix}'
+        wrapped = '\n'.join(display_seq[i:i + 80] for i in range(0, len(display_seq), 80))
+        self._fasta_box.setText(f'{header}\n{wrapped}')
+        self._fasta_box.setReadOnly(True)
+
+    def _show_shortcuts(self):
+        from PyQt5.QtWidgets import QMessageBox
+        QMessageBox.information(self, 'Keyboard Shortcuts', (
+            '<b>Navigation</b><br>'
+            'Space — Next well<br>'
+            'Backspace — Previous well<br>'
+            'Left/Right — Scroll ±100 scans<br>'
+            'Up/Down — Scroll ±20 scans<br>'
+            '<br><b>File</b><br>'
+            'Ctrl+S — Save FASTA<br>'
+            'Ctrl+O — Load settings<br>'
+            'Ctrl+E — Save processed data<br>'
+            'Ctrl+C — Copy FASTA<br>'
+            'Ctrl+F — Reset view<br>'
+            '<br><b>View</b><br>'
+            'R — Reset view<br>'
+            'G — Toggle reverse complement<br>'
+            'Q — Toggle Q-score bar<br>'
+            'L — Reload current well<br>'
+        ))
+
+    def _show_about(self):
+        from PyQt5.QtWidgets import QMessageBox
+        QMessageBox.about(self, 'About Sanger Toolkit', (
+            '<b>Sanger Toolkit — Basecaller GUI V15</b><br><br>'
+            'Open-source Sanger sequencing basecaller and viewer.<br>'
+            'Beats Cimarron 3.12 (91.5% de-novo, 100% polished).<br><br>'
+            'Modules: DSP, peak-calling, CNN basecaller,<br>'
+            'ABI/SCF import, batch processing, export.'))
 
 
 if __name__ == '__main__':
