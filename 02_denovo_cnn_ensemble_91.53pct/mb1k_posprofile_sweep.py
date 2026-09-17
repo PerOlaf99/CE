@@ -76,9 +76,13 @@ _MATCH, _MIS, _GAP = 2, -1, -2
 
 
 def sw_align(q, r):
+    """Local SW of q vs r.  Returns (aligned_q, aligned_r, ref_start) where
+    ref_start is the 0-based index in `r` of the first aligned ref base
+    (absolute FASTA coordinate, since the local alignment doesn't start at
+    ref position 0)."""
     n, m = len(q), len(r)
     if n == 0 or m == 0:
-        return '', ''
+        return '', '', 0
     dp = np.zeros((n + 1, m + 1), np.int16)
     for i in range(1, n + 1):
         same = np.frombuffer(q[i - 1].encode(), np.uint8) == np.frombuffer(r.encode(), np.uint8)
@@ -89,7 +93,7 @@ def sw_align(q, r):
     i, j = (int(x) for x in np.unravel_index(dp.argmax(), dp.shape))
     score = dp[i, j]
     if score < _MATCH * 3:
-        return '', ''
+        return '', '', 0
     aq, ar = [], []
     while i > 0 and j > 0 and dp[i, j] > 0:
         if q[i - 1] == r[j - 1] and dp[i, j] == dp[i - 1, j - 1] + _MATCH:
@@ -100,7 +104,7 @@ def sw_align(q, r):
             aq.append(q[i - 1]); ar.append('-'); i -= 1
         else:
             aq.append('-'); ar.append(r[j - 1]); j -= 1
-    return ''.join(reversed(aq)), ''.join(reversed(ar))
+    return ''.join(reversed(aq)), ''.join(reversed(ar)), j
 
 
 def errors_by_third(q, r):
@@ -185,7 +189,7 @@ def main():
                 continue
             tot_bits += r['bitscore']; tot_match += r['matched']; tot_id += r['identity']
             n += 1
-            q, s = sw_align(revcomp(seq), REF)
+            q, s, _ = sw_align(revcomp(seq), REF)
             cnt, nq = errors_by_third(q, s)
             for i in range(3):
                 errs[i] += cnt[i]
