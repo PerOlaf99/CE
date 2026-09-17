@@ -746,6 +746,16 @@ class SequencingGUI(QMainWindow):
         self.rsd_raw = None
         self.esd_data = None
         self.esd_traces = None
+        # Label->record offset: maps an ESD peak_positions value p onto the
+        # esd_traces record that letter was called on (p - label_off), i.e.
+        # the .esd's own internal axis. Kept separate from the user-facing
+        # record->scan offset (esd_offset_spin) because peak_positions carry
+        # a small constant bias (~+10 scans) relative to the physical
+        # separated-trace peaks: record r sits at scan r+1998, yet the letter
+        # at p sits on record p-2008 (=> letter physically at p-10). Mixing
+        # them up made the letters stay pinned at p while only the waveform
+        # slid with the spin.
+        self._esd_label_off = 0
         self.dll_tail_enabled = True
         self.dll_tail_split = 6000
         self.dll_tail_min_sep = 4
@@ -1276,7 +1286,7 @@ class SequencingGUI(QMainWindow):
             'call. Too small = double-calls on noisy peaks; too large = '
             'misses real close bases. Decimals allowed (e.g. 4.63).')
         self.distance_spin.setRange(0.1, 1000.0)
-        self.distance_spin.setValue(5.0)
+        self.distance_spin.setValue(4.0)
         self.distance_spin.valueChanged.connect(self._schedule_update)
         pdg_g.addWidget(QLabel('Distance:'), 1, 0)
         pdg_g.addWidget(self.distance_spin, 1, 1)
@@ -1833,7 +1843,7 @@ class SequencingGUI(QMainWindow):
             self.method_combo.setCurrentIndex(int(_method))
         except (TypeError, ValueError):
             self.method_combo.setCurrentIndex(0)
-        restore_dspin(self.distance_spin, 'min_distance', 5)
+        restore_dspin(self.distance_spin, 'min_distance', 4)
         restore_spin(self.prominence_spin, 'prominence_frac', 75)
         restore_spin(self.ambig_spin, 'min_signal_frac', 25)
         restore_spin(self.tol_spin, 'tolerance', 4)
@@ -2421,8 +2431,12 @@ class SequencingGUI(QMainWindow):
             self.esd_data = parse_esd(esd_path)
             self._load_esd_traces(esd_path)
             self.x_esd = np.arange(len(self.esd_traces))
-            self.esd_offset = self._estimate_esd_offset(
-                self.esd_data.get('peak_positions'), self.esd_traces)
+            # Two distinct offsets, see _esd_label_off above:
+            #   label_off = peak_positions -> esd record (the .esd's own axis)
+            #   esd_offset (spin) = esd record -> RSD scan (what is drawn)
+            self._esd_label_off = int(self._estimate_esd_offset(
+                self.esd_data.get('peak_positions'), self.esd_traces))
+            self.esd_offset = self._estimate_esd_scan_offset(self._esd_label_off)
             self.esd_offset_spin.blockSignals(True)
             self.esd_offset_spin.setValue(int(self.esd_offset))
             self.esd_offset_spin.blockSignals(False)
@@ -2516,6 +2530,7 @@ class SequencingGUI(QMainWindow):
                 'peak_positions': positions,
             }
             self.esd_offset = 0
+            self._esd_label_off = 0
             self.esd_offset_spin.blockSignals(True)
             self.esd_offset_spin.setValue(0)
             self.esd_offset_spin.blockSignals(False)
@@ -2575,6 +2590,63 @@ class SequencingGUI(QMainWindow):
             range(best_offset - coarse_step, best_offset + coarse_step + 1),
             key=score)
         return int(best_offset)
+
+    def _estimate_esd_scan_offset(self, label_off):
+        """Estimate the record->RSD-scan offset used to *display* the ESD
+        data (waveform + letter row) so it sits on the physical peaks.
+
+        label_off is the self-consistent ESD file offset (peak_positions ->
+        esd record) from _estimate_esd_offset. That differs from the
+        record->scan offset by a small constant because the ESD caller's
+        peak_positions carry a fixed positive scan bias relative to the
+        separated-trace apex (~+10 scans for this dataset). This method
+        measures that constant directly by anchoring each called base to
+        its own esd record and to the dominant physical peak of the same
+        channel in the separated trace.
+
+        Returns the record->scan offset (typically label_off - ~10).
+        Falls back to `label_off - 10` if the trace isn't processed yet."""
+        res = self._process()
+        if res is None:
+            return max(0, int(label_off) - 10)
+        sep = res[4]
+        if len(sep) == 0:
+            return max(0, int(label_off) - 10)
+        et = np.asarray(self.esd_traces, dtype=np.float64)
+        pp = self.esd_data.get('peak_positions')
+        seq = self.esd_data.get('sequence', '')
+        if pp is None or not seq or len(sep) < 20:
+            return max(0, int(label_off) - 10)
+        offs = []
+        n_e = len(et)
+        n_s = len(sep)
+        letters = 'TGCA'
+        for p0, b in zip(np.asarray(pp, dtype=np.int64), seq):
+            if b not in letters:
+                continue
+            ch = letters.index(b)
+            r0 = int(p0) - int(label_off)
+            best_r = None
+            for r in (r0 - 1, r0, r0 + 1):
+                if 0 <= r < n_e and int(np.argmax(et[r])) == ch:
+                    best_r = r
+                    break
+            if best_r is None:
+                continue
+            q0 = best_r + int(label_off)
+            lo, hi = max(1, q0 - 4), min(n_s - 1, q0 + 5)
+            best_q = None
+            for q in range(lo, hi + 1):
+                if int(np.argmax(sep[q])) == ch:
+                    if best_q is None or sep[q, ch] > sep[best_q, ch]:
+                        best_q = q
+            if best_q is not None:
+                offs.append(int(best_q) - int(best_r))
+            if len(offs) >= 800:
+                break
+        if not offs:
+            return max(0, int(label_off) - 10)
+        return int(np.median(offs))
 
     def _shift_channel(self, arr, shift):
         """Shift a 1-D channel trace by ``shift`` scans, padding with the
@@ -2751,7 +2823,7 @@ class SequencingGUI(QMainWindow):
         method. Fires when the user switches methods (saved settings are
         restored afterwards and take precedence over these defaults)."""
         if index == 0:  # Greedy (max-intensity)
-            self.distance_spin.setValue(5)
+            self.distance_spin.setValue(4)
             self.prominence_spin.setValue(200)     # min_frac 0.20
             self.norm_window_spin.setValue(800)
         elif index == 1:  # Per-channel (cluster)
@@ -3095,7 +3167,13 @@ class SequencingGUI(QMainWindow):
             esd_seq = seq if seq else ''
             for idx in range(len(peaks_arr)):
                 p = int(peaks_arr[idx])
-                native_guess = p - esd_offset
+                # ESD's own internal axis: which esd record was this base
+                # called on? peak_positions carry a fixed bias relative to
+                # the physical (separated-trace) peaks, so this uses the
+                # self-consistent label_off (p -> record), NOT the
+                # user-facing display offset. Mixing them up pinned every
+                # label at p regardless of the esd_offset spin.
+                native_guess = p - self._esd_label_off
                 # Clamp rather than skip: a peak that lands just outside
                 # [0, n_esd_recs) after offset correction (typically the
                 # first/last couple of calls) still gets a label at the

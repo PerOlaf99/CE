@@ -220,6 +220,69 @@ def detect_putative_peaks(envelope):
     return np.array(peaks, dtype=np.int64)
 
 
+def omit_okn_calibrated(peaks, envelope, expected_spacing=None,
+                        ht_lo=0.18, ht_hi=9.0, spacing_k=3,
+                        ok_frac=0.15, min_spacing=2.0):
+    """Calibrated OmitOkN for *envelope local-maxima* candidate sets.
+
+    Measured separation on the DLL's own lanes (60 wells, ESD positions):
+      true peaks:  ht/median ~ med 1.84 (p25 1.00, p75 3.10)
+      false peaks: ht/median ~ med 0.38 (p25 0.26, p75 1.65)
+    Cross-banding and modular spacing carry little signal, so the OK rule is
+    driven by HEIGHT with a spacing-grammar rescue for low-but-borderline
+    peaks (homopolymer / merged-band inserts are low-height but sit at an
+    integer multiple of the local band spacing).
+
+    Classification per candidate peak:
+      OK   if ht >= ht_hi * med
+      OK   if ht >= ht_lo * med AND a neighbor is an integer multiple of
+           expected_spacing away (modular spacing near 0/1)
+      OMIT otherwise (false peaks are the low, spacing-far outliers)
+
+    Returns list of (index, classification) tuples, classification in
+    {'OK','AMBIGUOUS','OMIT'}."""
+    env = np.asarray(envelope, dtype=np.float64)
+    peaks = np.asarray(peaks, dtype=np.int64)
+    n = len(env)
+    if len(peaks) == 0:
+        return []
+    ht = np.array([env[p] if 0 <= p < n else 0.0 for p in peaks])
+    hts = ht[ht > 0]
+    med = float(np.median(hts)) if len(hts) else 1.0
+    if expected_spacing is None:
+        d = np.diff(peaks)
+        d = d[d >= min_spacing]
+        expected_spacing = float(np.percentile(d, 40.0)) if len(d) else 8.0
+    expected_spacing = max(float(expected_spacing), 1e-6)
+
+    results = []
+    for k, p in enumerate(peaks):
+        p = int(p)
+        rel = ht[k] / med
+        if rel >= ht_hi:
+            results.append((p, 'OK'))
+            continue
+        # spacing grammar: is a neighbor an integer multiple of spacing away?
+        ok = False
+        for j in range(max(0, k - spacing_k), min(len(peaks), k + spacing_k + 1)):
+            if j == k:
+                continue
+            g = abs(int(peaks[j]) - p)
+            if g < min_spacing:
+                continue
+            ratio = g / expected_spacing
+            if abs(ratio - round(ratio)) <= ok_frac:
+                ok = True
+                break
+        if ok and rel >= ht_lo:
+            results.append((p, 'OK'))
+        elif rel >= 0.5 * ht_lo:
+            results.append((p, 'AMBIGUOUS'))
+        else:
+            results.append((p, 'OMIT'))
+    return results
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # OmitOkN fuzzy filter
 # ═══════════════════════════════════════════════════════════════════════

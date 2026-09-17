@@ -270,6 +270,16 @@ def pc_call_bases_greedy(separated, shifts, window=5, min_frac=0.20,
                          norm_window=800, region=None, min_distance_floor=1):
     """Greedy maximum-intensity peak caller on the combined envelope.
 
+    The envelope is normalized exactly like the GUI's "Separated (normalized)"
+    panel (pc_normalize_display: rolling local max with a median/lead floor and
+    a per-channel 99.5% rescale), so the called apex is the same peak the user
+    sees on screen.  A bare rolling-max normalization would flatten every peak
+    to ~1.0 and make np.argmax pick by scan order instead of strength, so the
+    tie-break at the maximum uses the RAW combined intensity: among the scan
+    positions sharing the visual maximum, the strongest raw peak is called
+    first.  This also stops a weak shoulder call from excising its stronger
+    neighbour.
+
     min_distance_floor enforces a minimum inter-peak (scan) separation --
     passed as the DE-tunable 'min_distance_floor' knob so the optimizer cannot
     over-call by driving the blanking window ('window') down to ~1 scan. A call
@@ -279,14 +289,12 @@ def pc_call_bases_greedy(separated, shifts, window=5, min_frac=0.20,
     n = len(separated)
     shifted_all = [dsp_shift_channel(separated[:, ch], int(shifts[ch]))
                    for ch in range(4)]
-    normed = np.empty_like(separated)
-    for ch in range(4):
-        shifted = shifted_all[ch]
-        rolled = maximum_filter1d(np.clip(shifted, 0, None),
-                                  size=max(3, int(norm_window)), mode='nearest')
-        rolled = np.where(rolled > 0, rolled, 1.0)
-        normed[:, ch] = shifted / rolled
-    comb = normed.max(axis=1)
+    shifted_mat = np.column_stack(shifted_all)
+    # Same normalization the GUI displays -> "call the peak the user sees".
+    display_win = max(3, int(norm_window))
+    env = pc_normalize_display(shifted_mat, window=display_win, region=region)
+    comb = env.max(axis=1)
+    comb_raw = np.clip(shifted_mat, 0, None).max(axis=1)
     start, stop = 0, n
     if region is not None and int(region[1]) > int(region[0]):
         start, stop = max(0, int(region[0])), min(n, int(region[1]))
@@ -298,25 +306,33 @@ def pc_call_bases_greedy(separated, shifts, window=5, min_frac=0.20,
     work = comb.copy()
     work[:start] = -1.0
     work[stop:] = -1.0
+    work_raw = comb_raw.copy()
+    work_raw[:start] = -1.0
+    work_raw[stop:] = -1.0
     picks = []
     letters = []
     while True:
-        i = int(np.argmax(work))
-        if work[i] < threshold:
+        mval = work.max()
+        if mval < threshold:
             break
-        ch = int(np.argmax(normed[i]))
+        # strongest raw peak among those sharing the visual maximum
+        i_cands = np.where(work >= mval - 1e-9)[0]
+        i = int(i_cands[np.argmax(work_raw[i_cands])])
+        ch = int(np.argmax(shifted_mat[i]))
         letter = CHEM_MAP[ch]
         picks.append(i)
         letters.append(letter)
         blank = max(int(window), int(min_distance_floor))
         lo, hi = max(0, i - blank), min(n, i + blank + 1)
         work[lo:hi] = -1.0
+        work_raw[lo:hi] = -1.0
     order = np.argsort(picks)
     positions = np.array(picks, dtype=np.int64)[order]
     sequence = ''.join(letters[k] for k in order)
     base_groups = [frozenset([letters[k]]) for k in order]
-    intensities = [{letters[k]: float(shifted_all[int(np.argmax(normed[picks[k]]))]
-                                        [picks[k]])} for k in order]
+    intensities = [{letters[k]: float(shifted_mat[picks[k],
+                                   int(np.argmax(shifted_mat[picks[k]]))])}
+                   for k in order]
     return positions, sequence, base_groups, intensities
 
 
@@ -377,84 +393,6 @@ def pc_fill_in_combined_peaks(separated, shifts, positions=None,
             continue
         if any(abs(p - q) < fill_gap for q in existing):
             continue
-        added.append((p, BASE_LETTERS[dom_ch]))
-        existing.add(p)
-    return sorted(added, key=lambda t: t[0])
-
-
-# ── Shoulder recovery ─────────────────────────────────────────────────
-
-def pc_fill_in_shoulders(separated, shifts, positions=None,
-                         norm_window=800, fill_gap=3, fill_margin=0.5,
-                         onset_frac=0.05, signal_onset_smooth=40,
-                         region=None):
-    """Recover shoulder peaks the greedy caller's excision blanks out.
-
-    The greedy caller (``pc_call_bases_greedy``) excises +/-window scans
-    around every called peak, so a genuine base whose apex sits inside that
-    band of a taller neighbor is silently dropped - even when it is a clean
-    single-channel local maximum (a "shoulder" of that neighbor).
-
-    Prominence-based detection can't find these: a flanking shoulder's
-    contour to its higher neighbor lies at essentially its own height, so
-    its prominence is squeezed toward zero by construction. This pass
-    therefore uses three criteria that are structurally independent of
-    prominence:
-
-      * the candidate must be a true local maximum of the normalized
-        combined envelope (keeps inflection/noise humps out),
-      * it must sit at least ``fill_gap`` scans from every existing call
-        (reuses the GUI's "Fill gap" knob),
-      * its winning channel must dominate the runner-up by at least
-        ``fill_margin`` (reuses the GUI's "Fill margin" knob). Real
-        shoulders are clean single-channel bumps; multi-channel noise
-        floods rarely reach 0.5 dominance.
-
-    Returns the added (position, base) pairs, sorted by position,
-    compatible with the existing fill-in flow (the GUI draws added bases
-    in orange)."""
-    n = len(separated)
-    if n == 0:
-        return []
-    shifted_all = [dsp_shift_channel(separated[:, ch], int(shifts[ch]))
-                   for ch in range(4)]
-    normed = np.empty_like(separated)
-    for ch in range(4):
-        sh = shifted_all[ch]
-        rolled = maximum_filter1d(np.clip(sh, 0, None),
-                                  size=max(3, int(norm_window)), mode='nearest')
-        rolled = np.where(rolled > 0, rolled, 1.0)
-        normed[:, ch] = sh / rolled
-    comb = normed.max(axis=1)
-
-    start = 0
-    stop = n
-    if region is not None and int(region[1]) > int(region[0]):
-        start = max(0, int(region[0]))
-        stop = min(n, int(region[1]))
-    elif onset_frac and onset_frac > 0:
-        start = pc_signal_onset(separated, onset_frac=onset_frac,
-                                smooth=signal_onset_smooth)
-
-    peaks, _ = find_peaks(comb, distance=1)
-    existing = set(int(p) for p in (positions or []))
-    fill_gap = max(1, int(fill_gap))
-    fill_margin = float(fill_margin)
-    added = []
-    for p in peaks:
-        p = int(p)
-        if p < start or p >= stop:
-            continue
-        if any(abs(p - q) < fill_gap for q in existing):
-            continue
-        vals = np.array([shifted_all[ch][p] for ch in range(4)])
-        top = vals.max()
-        if top <= 0:
-            continue
-        second = float(np.partition(vals, -2)[-2])
-        if (top - second) / top < fill_margin:
-            continue
-        dom_ch = int(np.argmax(vals))
         added.append((p, BASE_LETTERS[dom_ch]))
         existing.add(p)
     return sorted(added, key=lambda t: t[0])
@@ -647,6 +585,72 @@ def pc_hybrid_basecall(separated, shifts, snap_rad=6, peak_floor=0.02,
         base_groups.append(frozenset([letter]))
         intensities.append({letter: float(shifted[p].max())})
     return positions, sequence, base_groups, intensities
+
+
+# ── GapCheck refinement (patent EP0944739A1) ──────────────────────────
+
+def pc_gapcheck_refine(separated, shifts, min_distance=6, prominence_frac=0.02,
+                       norm_window=800, window=5, min_frac=0.20, region=None,
+                       verbose=False):
+    """Run greedy caller then GapCheck fuzzy-logic refinement.
+
+    Returns (positions, sequence, base_groups, intensities) in the same
+    format as the other callers.
+    """
+    from gap_check import refine_with_gap_check, assign_bases_with_channels
+
+    n = len(separated)
+    # Build shifted+normalized channels
+    shifted_all = [dsp_shift_channel(np.clip(separated[:, ch].astype(np.float64), 0, None),
+                                     int(shifts[ch]))
+                   for ch in range(4)]
+    # Envelope
+    env = np.max(np.column_stack(shifted_all), axis=1)
+
+    # Signal region
+    start, stop = 0, n
+    if region is not None and int(region[1]) > int(region[0]):
+        start, stop = max(0, int(region[0])), min(n, int(region[1]))
+    else:
+        from basecall import pc_signal_onset
+        start = pc_signal_onset(separated, onset_frac=0.05, smooth=40)
+
+    # Greedy caller for initial peaks
+    pos, seq, bg, intens = pc_call_bases_greedy(
+        separated, shifts, window=window, min_frac=min_frac,
+        norm_window=norm_window, region=region)
+
+    if len(pos) < 5:
+        return pos, seq, bg, intens
+
+    # Run GapCheck refinement on the full envelope
+    # Mask outside signal region for the refinement
+    env_work = env.copy()
+    env_work[:max(0, start - 50)] = 0.0
+    env_work[min(n, stop + 50):] = 0.0
+
+    result = refine_with_gap_check(env_work, pos, init_sequence=seq,
+                                   verbose=verbose)
+
+    ref_peaks = result['peaks']
+    # Assign bases from actual channel data
+    channels_4ch = np.column_stack(shifted_all)
+    ref_seq = assign_bases_with_channels(ref_peaks, channels_4ch)
+
+    # Build outputs in standard format
+    positions = np.array(ref_peaks, dtype=np.int64)
+    base_groups = [frozenset([b]) if b in 'ACGT' else frozenset()
+                   for b in ref_seq]
+    intensities = []
+    for p in ref_peaks:
+        p = int(p)
+        if 0 <= p < n:
+            vals = {['A', 'C', 'G', 'T'][c]: float(shifted_all[c][p])
+                    for c in range(4)}
+            intensities.append(vals)
+        else:
+            intensities.append({})
+    return positions, ref_seq, base_groups, intensities
 
 
 # ── Mobility-shift estimation ──────────────────────────────────────────

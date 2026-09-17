@@ -190,4 +190,8 @@ METRIC_TOOLTIPS = {
                     'headline target). Our called sequence is aligned to the '
                     'M13 reference slice and we count how many reference bases '
                     'we called correctly. Higher is better.'),
+    'M13 BLAST': ('BLAST-style local alignment identity (affine-gap Smith-'
+                   'Waterman) against M13 reference. Shows identity%, '
+                   'matches, mismatches, and indels. This matches what '
+                   'BLAST+ reports and is the genomics-standard metric.'),
 }

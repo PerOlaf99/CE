@@ -14,7 +14,7 @@ from scipy.ndimage import (
 )
 from scipy.sparse import diags as sparse_diags
 from scipy.sparse.linalg import spsolve
-from scipy.signal import savgol_filter
+from scipy.signal import savgol_filter, butter, filtfilt
 
 from constants import OFF_PATTERN
 
@@ -135,12 +135,7 @@ def dsp_rubberband_baseline(y, smooth_win=1):
         y = np.asarray(y, dtype=np.float64)
     x = np.arange(n, dtype=np.float64)
     points = np.column_stack([x, -y])
-    try:
-        hull = ConvexHull(points)
-    except Exception:
-        hull_pts = np.column_stack([x, -y])
-        hull_pts = hull_pts[np.argsort(hull_pts[:, 0])]
-        return -np.interp(x, hull_pts[:, 0], hull_pts[:, 1])
+    hull = ConvexHull(points)
     hull_pts = points[hull.vertices]
     hull_pts = hull_pts[np.argsort(hull_pts[:, 0])]
     baseline = np.interp(x, hull_pts[:, 0], hull_pts[:, 1])
@@ -328,6 +323,60 @@ def dsp_dominant_periodicities(y, top_n=5):
     return out
 
 
+# ── Bandpass filter ────────────────────────────────────────────────────
+
+def dsp_bandpass(y, low_period=None, high_period=None, order=2):
+    """Butterworth bandpass filter on a 1-D trace.
+
+    ``low_period``  – minimum period in scans to keep (removes slow drift
+                      below this).  None = no high-pass (lowpass only).
+    ``high_period`` – maximum period in scans to keep (removes noise above
+                      this).  None = no lowpass (highpass only).
+    ``order``       – Butterworth filter order (1-10).
+
+    Frequencies are converted to normalised digital frequency:
+    f_nyquist = 0.5, so cutoff = 1.0 / period / 0.5 = 2.0 / period.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    n = len(y)
+    if n < 12:
+        return y.copy()
+    order = max(1, min(int(order), 10))
+    nyq = 0.5
+    low = None
+    high = None
+    low_freq = None
+    high_freq = None
+    if high_period is not None and high_period > 1:
+        high = float(high_period)
+        high_freq = min(1.0 / high / nyq, 0.99)
+    if low_period is not None and low_period > 1:
+        low = float(low_period)
+        low_freq = min(1.0 / low / nyq, 0.99)
+    if high_freq is not None and low_freq is not None and low_freq >= high_freq:
+        high_freq = low_freq + 0.01
+    if high_freq is not None and low_freq is not None:
+        b, a = butter(order, [low_freq, high_freq], btype='band')
+    elif high_freq is not None:
+        b, a = butter(order, high_freq, btype='low')
+    elif low_freq is not None:
+        b, a = butter(order, low_freq, btype='high')
+    else:
+        return y.copy()
+    padlen = min(3 * (max(len(a), len(b)) - 1), n - 1)
+    if padlen < 1:
+        padlen = 1
+    return filtfilt(b, a, y)
+
+
+def dsp_bandpass_channels(sig, low_period=None, high_period=None, order=2):
+    """Bandpass each of the 4 channels of a (n,4) array."""
+    out = sig.copy()
+    for ch in range(out.shape[1]):
+        out[:, ch] = dsp_bandpass(out[:, ch], low_period, high_period, order)
+    return out
+
+
 def dsp_smooth_signal(corr, method, window, order):
     """corr: (n,4) baseline-subtracted signal."""
     sm = corr.copy()
@@ -416,27 +465,39 @@ def dsp_separate_channels(sm, bl, matrix):
 
 def dsp_full_pipeline(raw, mobility_shifts, baseline_method, baseline_window,
                       smooth_method, smooth_window, smooth_order, matrix,
-                      baseline_window2=None, matrix_apply_point='smoothed'):
+                      baseline_window2=None, matrix_apply_point='smoothed',
+                      band_low=None, band_high=None, band_order=2):
     """Full processing pipeline.  Returns (raw, bl, corr, sm, separated, mix).
 
     ``matrix_apply_point`` picks which stage the crosstalk separation matrix
     is applied to: 'none', 'offset', 'raw', 'corrected', 'smoothed',
     'shifted'.
+
+    ``band_low`` / ``band_high`` – bandpass filter periods in scans applied
+    after baseline correction and before smoothing.  None = no filter.
     """
     raw = raw.copy()
+    do_bandpass = (band_low is not None and band_low > 1) or \
+                  (band_high is not None and band_high > 1)
     if matrix_apply_point == 'offset':
         off = dsp_compute_baseline(raw, 'Noise Offset (pre-1500)',
                                    baseline_window, baseline_window2)
         off_corr = np.clip(raw - off, 0, None)
+        if do_bandpass:
+            off_corr = dsp_bandpass_channels(off_corr, band_low, band_high, band_order)
+        sm = dsp_smooth_signal(off_corr, smooth_method, smooth_window,
+                               smooth_order)
         sep_raw = dsp_separate_channels(off_corr, off, matrix)
         sep_bl = dsp_compute_baseline(sep_raw, baseline_method, baseline_window,
                                       baseline_window2)
         sep_corr = np.clip(sep_raw - sep_bl, 0, None)
         separated = dsp_smooth_signal(sep_corr, smooth_method, smooth_window,
                                       smooth_order)
-        return raw, off, off_corr, sep_corr, separated, matrix
+        return raw, off, off_corr, sm, separated, matrix
     bl = dsp_compute_baseline(raw, baseline_method, baseline_window, baseline_window2)
     corr = np.clip(raw - bl, 0, None)
+    if do_bandpass:
+        corr = dsp_bandpass_channels(corr, band_low, band_high, band_order)
     sm = dsp_smooth_signal(corr, smooth_method, smooth_window, smooth_order)
     if matrix_apply_point == 'raw':
         sep_raw = dsp_separate_channels(raw, bl, matrix)

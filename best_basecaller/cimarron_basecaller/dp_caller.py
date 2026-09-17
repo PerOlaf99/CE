@@ -76,8 +76,8 @@ def dp_call_bases(
 ) -> tuple[str, list[float]]:
     baseline_subtracted = robust_baseline_subtract(trace, window=baseline_window)
 
-    from .spacing_caller import detect_signal_region
-    sig_start, sig_end = detect_signal_region(baseline_subtracted)
+    from .spacing_caller import detect_signal_region_adaptive
+    sig_start, sig_end = detect_signal_region_adaptive(baseline_subtracted)
 
     norm_trace_full = normalize_channels_local(baseline_subtracted, window=local_norm_window)
     if mobility_shifts is not None:

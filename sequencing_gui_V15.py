@@ -640,7 +640,7 @@ class SequencingGUI(QMainWindow):
             'call. Too small = double-calls on noisy peaks; too large = '
             'misses real close bases. Decimals allowed (e.g. 4.63).')
         self.distance_spin.setRange(0.1, 1000.0)
-        self.distance_spin.setValue(5.0)
+        self.distance_spin.setValue(4.0)
         self.distance_spin.valueChanged.connect(self._schedule_update)
         pdg_g.addWidget(QLabel('Distance:'), 1, 0)
         pdg_g.addWidget(self.distance_spin, 1, 1)
@@ -1251,7 +1251,7 @@ class SequencingGUI(QMainWindow):
             self.method_combo.setCurrentIndex(int(_method))
         except (TypeError, ValueError):
             self.method_combo.setCurrentIndex(0)
-        restore_dspin(self.distance_spin, 'min_distance', 5)
+        restore_dspin(self.distance_spin, 'min_distance', 4)
         restore_spin(self.prominence_spin, 'prominence_frac', 200)
         restore_spin(self.ambig_spin, 'min_signal_frac', 25)
         restore_spin(self.tol_spin, 'tolerance', 4)
