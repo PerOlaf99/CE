@@ -201,10 +201,51 @@ LONGEST ERROR-FREE RUN 2026-09-16 (SNP-neutral, same-HSP columns, 96-well
      longest_run   = CLEANEST consecutive stretch (DLL +112/well: fewer
      scattered errors).  track_bases trades a few points of clean-stretch for
      a much longer true-positive read; the tail that wins matched_bp is
-     precisely where its errors concentrate (~8.4% tail error rate), so its
-     clean run is shorter.  A WIN against the DLL on BOTH bars simultaneously
-     (matched_bp AND longest_run) is the eventual acceptance target.
+precisely where its errors concentrate (~8.4% tail error rate), so its
+      clean run is shorter.  A WIN against the DLL on BOTH bars simultaneously
+      (matched_bp AND longest_run) is the eventual acceptance target.
 ```
+
+---
+
+## RELEASE-BRANCH TRIAL 2026-09-17 ("BEST_BASECALLER_RELEASE" tuning)
+
+Third tuning branch tried on the golden bar (full 96-well plate, same blastn
+megablast pipeline; one blastn per read for matched/cov/pident/full-id/bitscore
++ SNP-neutral longest run -- the two harnesses `plate_golden_eval.py` (repo
+caller) and `release_plate_eval.py` (release branch) use IDENTICAL metric
+definitions so the table is apples-to-apples).  It is a fork of the
+best_basecaller package tuned to LENGTHEN error-free reads while holding
+identity/coverage: configs `pos_bonus07` (recommended single), `pos_profile`
+(max matched_bp), `hz_soften` (hard-zone deconv), or all three with a per-well
+"ensemble" pick of max(bitscore x longest_run) as recommended by its README.
+
+96-well plate means:
+
+| caller | matched | bases | cov% | pident% | full-id% | bitscore | run | run>500 | >DLL matched |
+|---|---|---|---|---|---|---|---|---|---|
+| Cimarron DLL/ESD | 753.28 | 867.4 | 87.8 | 96.81 | 86.86 | 1278.3 | 398.1 | 32 | -- |
+| RELEASE **pos_bonus07** (recommended) | 782.76 | 927.2 | 87.1 | 95.02 | 84.70 | 1267.7 | 409.1 | 37 | 76/96 |
+| RELEASE **pos_profile** (max matched) | 797.17 | 970.6 | 85.1 | 94.86 | 82.33 | 1286.7 | 342.5 | 20 | 81/96 |
+| RELEASE **hz_soften** | 782.58 | 926.4 | 87.1 | 95.01 | 84.76 | 1267.4 | 409.5 | 32 | 76/96 |
+| RELEASE **ensemble** (max bits x run) | 789.51 | 939.7 | 86.8 | 94.99 | 84.28 | 1278.6 | **437.0** | **42** | 80/96 |
+| repo track_bases pos_profile (committed) | **816.09** | 969.5 | 88.2 | 93.94 | 84.24 | -- | 286.5 | 5 | 91/96 |
+
+Result: the release keeps its promise.  The ensemble's longest-run plate mean
+**437.0 is now AHEAD of the DLL (398.1)** and +150 over the committed repo
+caller, with **42/96** wells over a 500-base clean run (repo 5, DLL 32).  ID and
+coverage are upheld -- BLAST pident is actually BETTER than the committed repo
+caller (94.99 vs 93.94) and coverage is DLL-level.  The cost is ~27
+matched_bp/well (789.5 vs 816.1): the release emits ~30 fewer real tail bases
+per read, i.e. it deliberately trades tail-length recall for clean stretches --
+exactly the complementary end of the tradeoff vs the repo caller.  Both still
+beat the DLL on the **matched** bar (80/96 and 91/96).
+
+Decisions: ship repo `track_bases` (committed 816) when max matched_bp is the
+objective; use the release ensemble when the clean-stretch bar is weighted
+(first caller that beats the DLL on the run bar too).  Both preserve the
+mutation T 96/96 (hz_soften alone 95/96).  Artifacts: `release_plate_eval.py`;
+calls in `BEST_BASECALLER_RELEASE/plate_calls/`.
 
 ---
 
