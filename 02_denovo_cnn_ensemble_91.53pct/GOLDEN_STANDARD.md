@@ -10,6 +10,15 @@
 > local diff for the BLAST bar.  Those are diagnostics.  The match that counts
 > is NCBI-BLAST's `matched_bp` (matched = aligned − mismatches − gaps).
 >
+> Two acceptance bars, both on the SAME blastn HSP:
+>   1. **`matched_bp`** — how many reference base pairs the read gets right
+>      (THE metric; reward for emitting real bases, esp. the tail).
+>   2. **`longest_error_free_run`** — the longest consecutive stretch of
+>      error-free columns (reward for a CLEAN read).  The known template mutation
+>      (M13 fwd 5977) is excluded as NEUTRAL: the called T there neither counts
+>      nor breaks the run, so a clean read crossing the mutation site is not
+>      penalized (this is the "longest error-free read, SNP not counted" bar).
+>
 > Reference: `sanger_toolkit/refs/m13_M77815.1.fa` (M13mp18, 7250 nt).
 > Commands: `blastn -task megablast` against `makeblastdb` of that reference.
 
@@ -24,6 +33,13 @@
 | **coverage** | `coverage` | `(qend−qstart+1)/qlen` × 100 | fraction of OUR read inside the HSP |
 | **identity** | `pident` (BLAST) | `matched/aligned`; gaps-free matches vs the aligned platform | BLAST's own quality number |
 | **matched_bp** | `matched` | `aligned − mismatches − gaps` | **THE acceptance metric** |
+| **longest error-free run** | `longest_run` | longest consecutive run of matching columns on the same HSP, **M13 fwd 5977 excluded as neutral** | clean-stretch bar; read must be right for LONG, not just for MANY |
+
+Longest-run rule (2026-09-16): use the gapped HSP columns
+(`blastn -outfmt "6 ... qseq sseq"`, best-bitscore HSP), not a re-alignment;
+a column is a match iff `qseq[c]==sseq[c]` and neither is a gap; the known SNP
+column (the one whose forward coordinate == 5977) is skipped so it neither
+counts nor breaks the run.
 
 Plus ancillary from the same record:
 - `full_identity` = `matched / bases_detected` × 100 (matched_true / everything we emitted).
@@ -32,7 +48,7 @@ Plus ancillary from the same record:
   stored reverse-complement, so the reader may appear as Minus strand).
 
 **Priority when reading results:** (1) `matched_bp` (THE bar), (2) `coverage`,
-(3) `identity`, (4) `bases_detected`.
+(3) `identity`, (4) `bases_detected`, (5) `longest_run` (clean-stretch bar).
 
 ---
 
@@ -61,6 +77,10 @@ How to read this exact record:
   quoted vs **790 on A01** and vs the 48-well mean (DLL 754.8).
 - `full_id=94.16%` — 790 matched out of 839 emitted (the strictest, penalizes
   unaligned tail).
+- `longest_error_free_run` **= 506** (fwd 5719→6226 on the same HSP).  The two
+  flanking runs on either side of the mutation site (fwd 5977) merge into one
+  506-base clean stretch once the SNP column is excluded; without exclusion the
+  raw run is 257 (the read's own T at 5977 is a mismatch vs the RC-of-G C).
 
 ### Our best de-novo A01 for contrast (the gap we are closing)
 
@@ -147,19 +167,63 @@ POSITION-PROFILE 2026-09-15 (track_bases pos_profile, mb1k_posprofile_sweep.py):
        DLL (plate) .. bits = 1278.3   matched = 753.3   id = 96.8%
        -> beats DLL on BOTH metrics on BOTH splits: held bits +8.5,
           matched +64/well; plate bits +5.5, matched +63/well.
-       Fast-EMA tails, loose-prominence, and bonus ramps all lost; only the
-       pullback ramp helped.  Tail error-rate unchanged (~8.4%) - gains are
-       recovered tail length, not cleaner bases.
+Fast-EMA tails, loose-prominence, and bonus ramps all lost; only the
+        pullback ramp helped.  Tail error-rate unchanged (~8.4%) - gains are
+        recovered tail length, not cleaner bases.
+
+COMBINED 2026-09-16 (track_bases pos_profile + refine_denovo_v2 add-only):
+     Full 96-well plate on the golden bar.  Tested four fusion styles on 6
+     worst/first wells + full plate:
+       - greedy + tuned refine_v2 .......... 648.8 mean   (CNN gap-fill from
+         engine greedy start; tail recovery poor -> LOSES to DLL)
+       - track_bases alone (tuned_calls) ... 816.09 plate mean (91/96 > DLL)
+       - track_bases + refine_v2 add-only ... 816.65 plate mean (+53 matched,
+         30 wells gain, 0 wells loss)  <- BEST
+       - track_bases + CNN re-label ........ destroy (CNN was trained on
+         greedy-engine peaks; DSP band positions score low -> -100..-200)
+     => The CNN ensemble cannot re-label DSP-positioned bands (hurts).  Its
+        only safe use on top of track_bases is the no-drop gap-INSERTION pass
+        (+0.07% matched, no losses).  SHIP: tuned_calls/.
+        Calls: 02_denovo_cnn_ensemble_91.53pct/golden_plate_calls_trackBrefine/
+     Final plate standings: track_bases 816.09 / trackB+add-only 816.65 /
+     DLL 753.28.  Margin over DLL ~ +63 matched/well (+8.4%).
+     Mutation internal standard survives BOTH outputs in all 96 wells (T at
+     fwd 5977); the add-only refine inserts a few spurious homopolymer bases
+     around the motif in some wells but the T residue is always present.
+
+LONGEST ERROR-FREE RUN 2026-09-16 (SNP-neutral, same-HSP columns, 96-well
+     plate; metric defined above):
+       DLL ................ mean 398.1  med 375.5  min 228 max 626  (>500: 33w)
+       track_bases ........ mean 286.5  med 280.5  min 114 max 590  (>500: 5w)
+       trackB+add-only .... mean 213.6  med 210.0  min  93 max 335  (>500: 0w)
+     Story: the two bars are complementary and DLL still leads ONE of them.
+     matched_bp = total real bases recovered (trackB +63/well: longer tail).
+     longest_run   = CLEANEST consecutive stretch (DLL +112/well: fewer
+     scattered errors).  track_bases trades a few points of clean-stretch for
+     a much longer true-positive read; the tail that wins matched_bp is
+     precisely where its errors concentrate (~8.4% tail error rate), so its
+     clean run is shorter.  A WIN against the DLL on BOTH bars simultaneously
+     (matched_bp AND longest_run) is the eventual acceptance target.
 ```
 
 ---
 
 ## The mutation internal standard (independent of BLAST, always check it)
 
-- Exactly ONE true template mutation: **M13 pos 5977 (1-based, local file);
-  ESD read-strand base at ESD index 308 = T (M13 = C).**  Flank `CCGTCTC[G]CTGGTGA`.
+- Exactly ONE true template mutation.  Coordinates CONFIRMED 2026-09-16 by
+  reference search + BLAST mapping (previous 5977-only note was imprecise):
+  - **M13 forward pos 5977 (1-based, `m13_M77815.1.fa`) : reference base G.
+    Sequence flank (fwd): `CCGTCTC[G]CTGGTGA` (G at 5977).**
+  - The read-wildtype motif `CACCAGCGAGACGGG` STARTS at M13 fwd **5983** (the
+    G flank continues into it); the sequencing/ESD read carries **T** at that
+    site: read motif `CACCAG[T]GAGACGGG` (T is the 7th base, fwd 5977).
+  - ESD read-strand base at **ESD index 308 (0-based, A01) = T** (M13 read-
+    orient = C).  In the read it is a **C→T** transition (G→A on the forward /
+    reference strand).
 - A caller that reads the wild-type C here is WRONG about the construct.
-- Track as "mutation called T in N/wells" (v3: 45/47; v4: 100%; v5: 36/37).
+- Track as "mutation called T in N/wells" (v3: 45/47; v4: 100%; v5: 36/37;
+  track_bases pos_profile 2026-09-16: **96/96 — the T is preserved in every
+  well**).
 
 ---
 
