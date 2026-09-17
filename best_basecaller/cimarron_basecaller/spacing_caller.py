@@ -726,6 +726,33 @@ def apply_position_adaptive_spectral_separation(
     return out
 
 
+def detect_signal_region_adaptive(
+    baseline_subtracted: np.ndarray,
+    full_length: int = 8000,
+) -> tuple[int, int]:
+    """Pick the right signal-region detector for the trace's axis.
+
+    detect_signal_region()'s default search_bounds=(1500, -100) is a
+    run/timing prior tuned on FULL-LENGTH raw acquisition traces (this
+    plate: all RSD files are 9647 scans, so the physically-relevant
+    injection window is ~scan 2000). It is NOT valid on cropped/
+    processed trace containers (SCF export, ABD's DATA9-12): those are
+    typically ~7100-7700 samples long and already trimmed to start at the
+    real signal (first DLL peak lands near sample 75, not ~2000), so
+    applying the 1500/100-scan prior would strip the first ~1500 scans of
+    genuine signal (~170 bases) -- measured to drop peak recall vs the DLL
+    from ~97% to ~76% on SCF/ABD traces.
+
+    Rule: full-length traces (>= `full_length` samples) keep the tuned
+    prior path (byte-identical to the historical raw pipeline); shorter
+    traces are treated as cropped and use detect_signal_region_auto(),
+    which is self-contained (no run-specific timing baked in).
+    """
+    if baseline_subtracted.shape[0] >= full_length:
+        return detect_signal_region(baseline_subtracted)
+    return detect_signal_region_auto(baseline_subtracted)
+
+
 def find_start_position(envelope: np.ndarray, threshold: float = 0.15, sustained: int = 20) -> int:
     """Find the first point where the envelope sustainably rises above
     `threshold` (avoiding triggering on an isolated early noise spike)."""
@@ -790,6 +817,7 @@ def track_bases(
     repeat_gap_factor: float = 1.15,
     repeat_min_sub_peak_prominence: float = 0.4,
     repeat_valley_depth_frac: float = 0.8,
+    merge_sub_spacing: bool | float | None = None,
     spectral_separation_matrix: np.ndarray | str | None = "default",
     smoothing_window: int = 2,
     use_gaussian_reconstruction: bool = False,
@@ -839,7 +867,7 @@ def track_bases(
             # pass track gives a real spacing curve so bucket boundaries
             # land at equal BASE COUNT, not equal scan-position span (see
             # apply_position_adaptive_spectral_separation docstring).
-            sig_start_pre, sig_end_pre = detect_signal_region(baseline_subtracted)
+            sig_start_pre, sig_end_pre = detect_signal_region_adaptive(baseline_subtracted)
             _, _, pre_tracked = track_bases(
                 trace, base_order=base_order, spectral_separation_matrix=None,
                 use_gaussian_reconstruction=False, position_adaptive_spectral=False,
@@ -872,7 +900,7 @@ def track_bases(
         # reconstruction/deconvolution filter, bandwidth set from measured
         # band spacing. See gaussian_reconstruction_filter().
         env_for_spacing = norm_trace.max(axis=1)
-        sig_start_gr, sig_end_gr = detect_signal_region(baseline_subtracted)
+        sig_start_gr, sig_end_gr = detect_signal_region_adaptive(baseline_subtracted)
         spacing_for_filter = estimate_global_spacing(env_for_spacing, sig_start_gr, sig_end_gr)
         spacing_curve_const = np.full(norm_trace.shape[0], spacing_for_filter)
         norm_trace = apply_gaussian_reconstruction_windowed(
@@ -926,7 +954,7 @@ def track_bases(
     _profiled_bonus = "channel_peak_bonus" in _profiled
     use_pos_bonus = _profiled_bonus and use_combined_channel_score
 
-    sig_start, sig_end = detect_signal_region(baseline_subtracted)
+    sig_start, sig_end = detect_signal_region_adaptive(baseline_subtracted)
     global_spacing = estimate_global_spacing(envelope, sig_start, sig_end)
     pos = sig_start
     spacing = global_spacing  # start from the robust global estimate, not a fixed constant
@@ -1014,6 +1042,10 @@ def track_bases(
                                                 min_sub_peak_prominence=repeat_min_sub_peak_prominence,
                                                 valley_depth_frac=repeat_valley_depth_frac)
 
+    if merge_sub_spacing:
+        threshold = 0.65 if merge_sub_spacing is True else float(merge_sub_spacing)
+        results = merge_sub_spacing_gaps(results, threshold=threshold)
+
     if auto_trim and results:
         if trim_method == "mott":
             start, end = trim_mott(results, quality_cutoff=mott_quality_cutoff)
@@ -1024,3 +1056,33 @@ def track_bases(
     sequence = "".join(base_order[b.channel] for b in results)
     qualities = [b.height for b in results]
     return sequence, qualities, results
+
+
+def merge_sub_spacing_gaps(bands: list[TrackedBase], threshold: float = 0.65,
+                           ) -> list[TrackedBase]:
+    """Drop the weaker base of every consecutive pair closer than
+    `threshold` x the read's median inter-base spacing.
+
+    Measured across the 96-well M13 plate (with the Cimarron/DLL caller as
+    a cadence oracle): at threshold=0.65, per-well agreement with the DLL
+    rises on 96/96 wells (~+0.11 SequenceMatcher mean, ~178 bases/read
+    removed).  That direction is NOT free -- the same pass lowers per-base
+    identity to the M13 reference by ~0.8pp (67/96 wells), because the
+    tracker's sub-spacing calls in dense stretches (3-6 scan gaps) carry
+    real sequence that the DLL's grid flattens.  So this is an explicit,
+    opt-in cadence trade toward DLL/upstream-tool compatibility, not a
+    default.  Pass `merge_sub_spacing=True` to track_bases to enable.
+    """
+    if len(bands) < 2:
+        return list(bands)
+    pos = np.fromiter((b.position for b in bands), dtype=float, count=len(bands))
+    height = np.fromiter((b.height for b in bands), dtype=float, count=len(bands))
+    cut = threshold * float(np.median(np.diff(pos)))
+    keep = np.ones(len(bands), dtype=bool)
+    for i in range(len(bands) - 1):
+        if keep[i] and keep[i + 1] and (pos[i + 1] - pos[i]) < cut:
+            if height[i] <= height[i + 1]:
+                keep[i] = False
+            else:
+                keep[i + 1] = False
+    return [b for k, b in zip(keep, bands) if k]
