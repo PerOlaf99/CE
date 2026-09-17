@@ -1962,3 +1962,28 @@ Run deterministic **position snap on GUI grid**:
   learned GUI->ESD-frame position regression trained on the 40 TRAIN wells (denovo, non-oracle) - the one
   un-tried de-novo path; low expectation given snap hurt even order-preserving.
 --------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+## Session 2026-09-17: patent Steps 2-4 (cepstral blind deconvolution) REJECTED (again) — verdict logged
+- The reworked `cepstral.py`/`patent_steps.py` (commit 1c0c1971, nfeeder window
+  2048/1900 + FBW + iterative real-cepstral Stockham/Ives deconvolution + FSM
+  peak detect) was plate-benchmarked on A01 for the first time today.
+- BUG in the port: `_overshoot_attenuate` (patent "extra-normalization") was
+  defined but NEVER CALLED in `deconvolve_lane`; the `exp(±12)` whitening clip
+  blew the raw trace up 49x (max 5.7 -> 279).
+- After repairing it (per-iteration rescale to the original lane scale + mag
+  clip 3..8, gain 0.5..1.0) the sharp trace is correctly scaled (max 5.7) but
+  the result still FAILS: candidate peaks stay 1556-2637 (real bases ~840) and
+  BLAST finds no HSP at every (clip, gain, iters) tested:
+      clip=8 -> sharp_max 5.7, peaks 1918, NO BLAST
+      clip=6 ->                 1917, NO BLAST
+      clip=5 ->                 1815, NO BLAST
+      clip=3 ->                 1556, NO BLAST
+      (comparisons) raw sep FSM = 777 peaks / matched 626; DLL = 790.
+- Root cause unchanged from Aug-26 (PROJECT_HISTORY.md above): the patent
+  cepstral lifter/FBW is tuned for Cimarron's own ~4-8-scan native spacing;
+  our spec-separated lanes peak at ~3 scans, so over-sharpening splits each
+  base into 2-3 ringing sub-peaks.  Dampening gain/clip does not rescue it;
+  NOT deconvolving (stage 4 FSM on raw sep) already beats it (626 vs no-aln).
+- VERDICT: patent Steps 2-4 (blind deconvolution) CLOSED for good on this
+  dataset.  stage6_cepstral removed from patent_steps.STAGES.  The CNN/track_bases
+  path (plate matched 816 vs DLL 753) remains the winning architecture.

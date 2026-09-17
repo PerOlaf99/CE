@@ -25,6 +25,11 @@ move position-match toward 1.00?  Currently we do NOT implement all patent
 steps - stages are progressively built.  Stage 0 = current best guess; each
 later stage is filled in as we go.
 
+NOTE (2026-09-17): stage 6 (cepstral blind deconvolution, Steps 2-4) was
+benchmarked and REJECTED - see STAGES registry comment + PROJECT_HISTORY.
+The winning path is the CNN/track_bases fused caller (plate matched ~816 vs
+DLL 753), not the patent DSP path.
+
 Usage:
   python3 patent_steps.py --stage 0 --wells A01 B05 ...
   python3 patent_steps.py --stage all
@@ -124,17 +129,6 @@ def stage5_multipass(well, rsd_path):
     return _mp_peaks(sep)
 
 
-import cepstral
-
-
-def stage6_cepstral(well, rsd_path):
-    """Patent Steps 2-4: nfeeder window + spacing/FBW + real-cepstral blind
-    deconvolution + FSM peak detect."""
-    sep = _dsp(well, rsd_path)
-    return cepstral.run(sep, window=2048, step=1900, iters=3,
-                        env_floor_frac=0.05)
-
-
 def stage0_preprocess_only(well, rsd_path):
     _dsp(well, rsd_path)  # prime the cache (used by all later stages)
     ch_raw, _ = cim.read_rsd(rsd_path)
@@ -165,7 +159,11 @@ STAGES = {
     0: stage0_preprocess_only,
     4: stage4_fsm,
     5: stage5_multipass,
-    6: stage6_cepstral,
+    # 6: stage6_cepstral  -- REJECTED 2026-09-17: cepstral blind deconvolution
+    #    over-sharpens our 3-scan-spaced lanes into 2-3 ringing sub-peaks/base
+    #    (1556-2637 candidates vs ~840 real bases) -> NO BLAST HSP at every
+    #    (clip, gain, iters).  Patent lifter tuned for Cimarron's own spacing;
+    #    dampening does not rescue it.  See PROJECT_HISTORY (2026-09-17).
 }
 
 
