@@ -62,3 +62,7 @@ MB1000_M13_DT/
 
 # Local optimization job produces
 sanger_toolkit/opt_windows_labels*/
+
+# Bundled example traces shipped with the app (small, intentional exception)
+!Limoncello scorer/example_data/
+!Limoncello scorer/example_data/**
