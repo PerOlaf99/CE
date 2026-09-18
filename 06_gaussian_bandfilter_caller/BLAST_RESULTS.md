@@ -98,3 +98,40 @@ python eval_plate.py                 # canonical ratio -> report.json
 and reports matched bases, aligned length, %ID, bit score, coverage (vs
 reference and vs read) and the SNP-neutral longest error-free stretch for both
 callers.
+
+## Gap analysis: why the longest-run bar is not yet won
+
+We already win the two GOLDEN counters (matched bases + bit score). The
+remaining deficit is `longest_error_free_run` (331.7 vs 490.7). Diagnosing the
+per-well / per-column structure (`exp_perwell.py`, `exp_longest.py`) shows:
+
+| caller | insertions | deletions | substitutions | aligned |
+|--------|-----------:|----------:|--------------:|--------:|
+| ours (profiled) | 1,301 | 1,320 | **2,334** | 83,298 |
+| Cimarron DLL    |   501 | 1,466 |   **473** | 74,726 |
+
+The gap is **substitutions, not indels**, and it is **broad** (the DLL has the
+longer run on 86/96 wells). Our advantage in matched bases comes from calling
+the degraded 3' tail, i.e. longer reads (966 vs 873 bp); that extra length is
+net-positive for the primary counter but carries a lower per-position accuracy.
+
+Two negative results confirm this interpretation:
+
+* Insertion pruning (`prune_spurious_insertions`, the patent's "OmitOkN"
+  heuristic) only fires on ~50 columns plate-wide (`exp_prune.py`,
+  `report_prune.json`); it nudges identity up but leaves the longest run
+  unchanged, and pushing it harder just deletes true bases. The unwanted
+  columns are not isolated shoulders of resolved peaks.
+* Softening the profiled tail (`exp_profile3.py`, `report_profile3.json`)
+  raises %ID and cuts insertions monotonically (94.08 -> 94.59) but lowers
+  matched bases (816 -> 803) and does not lengthen the longest run.
+* A Pareto scan of **all ~120 tried configurations** (`exp_pareto.py`) finds no
+  setting that dominates the current winner; the 96-well frontier is flat
+  around matched ~810-820 with longest ~330. Configs that show matched >818
+  score only 89-93 wells (the runaway wells drop out), so they are not real
+  improvements.
+
+Conclusion: the longest-run bar requires improving **per-position accuracy**
+(the patent's iterative real-cepstral blind deconvolution plus the
+Monte-Carlo-mobility "extra-normalization" that attenuates overshoot), not
+further tuning of the tracking/profiling knobs. That stage is not yet ported.

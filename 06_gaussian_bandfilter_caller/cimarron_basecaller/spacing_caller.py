@@ -796,6 +796,52 @@ def _ramp_array(value, frac_of: np.ndarray, f0: float, f1: float) -> np.ndarray:
     return np.full(frac_of.shape, float(value), dtype=float)
 
 
+def prune_spurious_insertions(
+    tracked: list[TrackedBase],
+    merge_frac: float = 1.4,
+    height_frac: float = 0.9,
+    max_iter: int = 4,
+) -> list[TrackedBase]:
+    """Fuzzy insertion detection ("OmitOkN" in the real module names).
+
+    A single real spacing interval should contain at most one band. If a called
+    base sits BETWEEN two neighbours whose combined spacing `(b-a) + (c-b)` is
+    smaller than `merge_frac` times the locally expected spacing, then it is a
+    candidate over-call: three called bases occupy the room of fewer than
+    ~1.4 real bands. We only drop it when it is also weaker than BOTH
+    neighbours (`height < height_frac * min(neighbour heights)`), i.e. it looks
+    like a shoulder of a broad peak rather than a resolved band. Removing a
+    spurious insertion deletes a gap column, which merges the flanking
+    matching runs -- raising identity and the longest error-free run without
+    removing any true match.
+
+    Iterates until no more candidates (or `max_iter`), so runs of overcalls
+    collapse one at a time.
+    """
+    if len(tracked) < 3:
+        return tracked
+    out = list(tracked)
+    for _ in range(max_iter):
+        removed = False
+        i = 1
+        while i < len(out) - 1:
+            a, b, c = out[i - 1], out[i], out[i + 1]
+            d1 = b.position - a.position
+            d2 = c.position - b.position
+            if d1 <= 0 or d2 <= 0:
+                i += 1
+                continue
+            exp = b.spacing_used if b.spacing_used and b.spacing_used > 0 else (d1 + d2) / 2.0
+            if (d1 + d2) < merge_frac * exp and b.height < height_frac * min(a.height, c.height):
+                del out[i]
+                removed = True
+                continue
+            i += 1
+        if not removed:
+            break
+    return out
+
+
 def track_bases(
     trace: np.ndarray,
     base_order: str = "ACGT",
@@ -838,6 +884,10 @@ def track_bases(
     # mechanism is sound (this is a real, diagnosed failure mode) but the
     # current threshold isn't there yet.
     profile_fracs: tuple[float, float] = (0.0, 1.0),
+    prune_insertions: bool = False,
+    prune_merge_frac: float = 1.4,
+    prune_height_frac: float = 0.9,
+    prune_max_iter: int = 4,
 ) -> tuple[str, list[float], list[TrackedBase]]:
     """Walk the trace predicting each next base position from a running
     local spacing estimate. Returns (sequence, qualities, tracked_bases).
@@ -998,6 +1048,11 @@ def track_bases(
         results = second_pass_repeat_detection(results, norm_trace, gap_factor=repeat_gap_factor,
                                                 min_sub_peak_prominence=repeat_min_sub_peak_prominence,
                                                 valley_depth_frac=repeat_valley_depth_frac)
+
+    if prune_insertions and results:
+        results = prune_spurious_insertions(results, merge_frac=prune_merge_frac,
+                                            height_frac=prune_height_frac,
+                                            max_iter=prune_max_iter)
 
     if auto_trim and results:
         if trim_method == "mott":
