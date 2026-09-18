@@ -762,14 +762,48 @@ def estimate_global_spacing(envelope: np.ndarray, sig_start: int, sig_end: int) 
 DEFAULT_MOBILITY_SHIFTS = [-2, -1, -2, 2]  # A, C, G, T
 
 
+def _ramp_value(value, frac: float, f0: float, f1: float) -> float:
+    """Evaluate a possibly position-profiled parameter at scan-fraction `frac`.
+
+    If `value` is a scalar, return it unchanged (so the scalar config is
+    reproduced byte-identically to the un-profiled caller). If `value` is a
+    (start, end) pair, linearly interpolate start->end as `frac` runs from `f0`
+    to `f1` (clamped outside that interval). A (v, v) pair is treated as the
+    scalar v, again for byte-identical flat behaviour.
+    """
+    if isinstance(value, (tuple, list, np.ndarray)) and len(value) == 2:
+        a, b = float(value[0]), float(value[1])
+        if a == b:
+            return a
+        if f1 <= f0:
+            return b
+        t = (frac - f0) / (f1 - f0)
+        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        return a + (b - a) * t
+    return float(value)
+
+
+def _ramp_array(value, frac_of: np.ndarray, f0: float, f1: float) -> np.ndarray:
+    """Vectorized `_ramp_value` over a per-sample fraction array."""
+    if isinstance(value, (tuple, list, np.ndarray)) and len(value) == 2:
+        a, b = float(value[0]), float(value[1])
+        if a == b:
+            return np.full(frac_of.shape, a, dtype=float)
+        if f1 <= f0:
+            return np.full(frac_of.shape, b, dtype=float)
+        t = np.clip((frac_of - f0) / (f1 - f0), 0.0, 1.0)
+        return a + (b - a) * t
+    return np.full(frac_of.shape, float(value), dtype=float)
+
+
 def track_bases(
     trace: np.ndarray,
     base_order: str = "ACGT",
     initial_spacing: float = 14.0,
     window_frac: tuple[float, float] = (0.66, 1.35),
-    min_prominence: float = 0.05,
-    ema_alpha: float = 0.08,
-    pullback_weight: float = 0.08,
+    min_prominence: float | tuple[float, float] = 0.05,
+    ema_alpha: float | tuple[float, float] = 0.08,
+    pullback_weight: float | tuple[float, float] = 0.08,
     baseline_window: int = 151,
     local_norm_window: int = 300,
     mobility_shifts: list[int] | str | None = "default",
@@ -797,12 +831,13 @@ def track_bases(
     gaussian_recon_segment_size: int = 512,
     position_adaptive_spectral: bool = False,
     use_combined_channel_score: bool = False,
-    channel_peak_bonus: float = 0.5,  # tested across all 12 wells: net negative on
+    channel_peak_bonus: float | tuple[float, float] = 0.5,  # tested across all 12 wells: net negative on
     # balanced accuracy (coverage +6.4pp but identity -4.1pp) -- more false
     # repeat insertions than true ones recovered with current tuning. Left
     # in and available to opt into / keep tuning, not removed, since the
     # mechanism is sound (this is a real, diagnosed failure mode) but the
     # current threshold isn't there yet.
+    profile_fracs: tuple[float, float] = (0.0, 1.0),
 ) -> tuple[str, list[float], list[TrackedBase]]:
     """Walk the trace predicting each next base position from a running
     local spacing estimate. Returns (sequence, qualities, tracked_bases).
@@ -820,6 +855,14 @@ def track_bases(
     cluster that can appear at the end of a run once fragments are long
     enough that separation breaks down. Set False to get the raw,
     untrimmed call (e.g. for diagnostics).
+
+    Position profiling: `ema_alpha`, `pullback_weight`, `min_prominence` and
+    `channel_peak_bonus` may each be given as a (start, end) pair instead of a
+    scalar. The pair is linearly interpolated over the scan-fraction interval
+    `profile_fracs` (fraction of the trace between the detected signal-region
+    start and end), so a parameter can e.g. loosen its pull-back toward the
+    global spacing across the degraded 3' tail. A scalar, or a (v, v) pair,
+    reproduces the un-profiled caller byte-for-byte.
     """
     baseline_subtracted = robust_baseline_subtract(smooth_trace(trace, smoothing_window), window=baseline_window)
     if spectral_separation_matrix is not None:
@@ -876,6 +919,11 @@ def track_bases(
     best_channel = norm_trace.argmax(axis=1)
     n = len(envelope)
 
+    sig_start, sig_end = detect_signal_region(baseline_subtracted)
+    _span = max(1, sig_end - sig_start)
+    frac_of = np.clip((np.arange(n) - sig_start) / _span, 0.0, 1.0)
+    _pf0, _pf1 = profile_fracs
+
     if use_combined_channel_score:
         # Boost each channel's value wherever that sample is ALSO an
         # independently-detected local peak on that specific channel --
@@ -883,11 +931,16 @@ def track_bases(
         # relative height, and single-channel peak detection) rather than
         # trusting the envelope-argmax alone.
         channel_peak_mask = precompute_channel_peak_masks(norm_trace)
-        boosted = norm_trace * (1.0 + channel_peak_mask.astype(float) * channel_peak_bonus)
+        if (isinstance(channel_peak_bonus, (tuple, list, np.ndarray))
+                and len(channel_peak_bonus) == 2
+                and float(channel_peak_bonus[0]) != float(channel_peak_bonus[1])):
+            bonus_arr = _ramp_array(channel_peak_bonus, frac_of, _pf0, _pf1)
+            boosted = norm_trace * (1.0 + channel_peak_mask.astype(float) * bonus_arr[:, None])
+        else:
+            boosted = norm_trace * (1.0 + channel_peak_mask.astype(float) * channel_peak_bonus)
         envelope = boosted.max(axis=1)
         best_channel = boosted.argmax(axis=1)
 
-    sig_start, sig_end = detect_signal_region(baseline_subtracted)
     global_spacing = estimate_global_spacing(envelope, sig_start, sig_end)
     pos = sig_start
     spacing = global_spacing  # start from the robust global estimate, not a fixed constant
@@ -895,6 +948,10 @@ def track_bases(
     results: list[TrackedBase] = []
 
     while pos < n:
+        _frac = (pos - sig_start) / _span
+        _mp = _ramp_value(min_prominence, _frac, _pf0, _pf1)
+        _ea = _ramp_value(ema_alpha, _frac, _pf0, _pf1)
+        _pw = _ramp_value(pullback_weight, _frac, _pf0, _pf1)
         expected_next = pos + spacing
         lo = int(expected_next - spacing * (1 - window_frac[0]))
         hi = int(expected_next + spacing * (window_frac[1] - 1))
@@ -910,7 +967,7 @@ def track_bases(
         local_peak_pos = lo + local_peak_offset
         local_peak_val = window[local_peak_offset]
 
-        if local_peak_val < min_prominence:
+        if local_peak_val < _mp:
             # No credible peak in the expected window -- count a miss and
             # advance by the current spacing estimate anyway, so a few
             # consecutive weak/missed bases don't derail tracking entirely.
@@ -922,12 +979,12 @@ def track_bases(
 
         misses = 0
         observed_spacing = local_peak_pos - pos
-        spacing = (1 - ema_alpha) * spacing + ema_alpha * observed_spacing
+        spacing = (1 - _ea) * spacing + _ea * observed_spacing
         # Pull back toward the robust global estimate every step, so a
         # noisy local stretch can nudge the estimate but can't make it
         # drift away unboundedly -- it's always being tugged back toward
         # what the whole read's spacing actually looks like.
-        spacing = (1 - pullback_weight) * spacing + pullback_weight * global_spacing
+        spacing = (1 - _pw) * spacing + _pw * global_spacing
         spacing = float(np.clip(spacing, global_spacing * 0.5, global_spacing * 2.0))
 
         ch = int(best_channel[local_peak_pos])

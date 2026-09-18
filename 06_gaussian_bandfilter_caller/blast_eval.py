@@ -12,7 +12,10 @@ Cimarron 3.12 ESD calls:
   bit score              BLAST bit score of the best HSP
   % coverage (ref)       HSP length / reference length
   % coverage (read)      HSP length / called read length
-  longest error-free     longest run of consecutive matches along the HSP
+  longest error-free     longest run of consecutive matches along the HSP,
+                         with the template mutation (fwd 5977) treated as
+                         NEUTRAL (neither counts nor breaks the run) per the
+                         project GOLDEN STANDARD; `..._raw` ignores the rule
   mean read length       called length
   total gaps             gaps in the HSP
 
@@ -39,6 +42,7 @@ ESD = os.path.join(_REPO, "ground_truth", "MB1000_M13_DT_Cp312_MD1")
 RSD = os.path.join(_REPO, "MB1000_M13_DT")
 WORK = os.path.join(_HERE, "blast_work")
 REF_ID = "M77815.1"
+SNP_POS = 5977  # M13 forward coordinate of the single template mutation (neutral)
 
 
 def _blast_bin(name):
@@ -92,34 +96,57 @@ def _esd_seq(path):
                        if c in "ACGTNacgtn").upper()
 
 
-def _longest_perfect(qseq, sseq):
-    """Longest run of consecutive identical columns (gaps break the run)."""
+def _longest_perfect(qseq, sseq, sstart, send, snp_pos=SNP_POS):
+    """Longest run of consecutive identical columns on the same HSP.
+
+    Matches the GOLDEN STANDARD: gaps break the run, and the known template
+    mutation column (reference forward coordinate `snp_pos`) is NEUTRAL -- it
+    neither counts toward nor breaks the run, so a clean read crossing the
+    mutation site is not penalized.
+
+    Returns (neutral_run, raw_run). The neutral run is the headline bar.
+    """
+    step = 1 if send >= sstart else -1
+    coord = sstart
     best = run = 0
+    best_raw = run_raw = 0
     for a, b in zip(qseq, sseq):
+        c = None
+        if b != "-":
+            c = coord
+            coord += step
+        if c == snp_pos:
+            continue  # neutral: leave both runs untouched
         if a != "-" and a == b:
             run += 1
-            best = max(best, run)
+            run_raw += 1
+            if run > best:
+                best = run
+            if run_raw > best_raw:
+                best_raw = run_raw
         else:
             run = 0
-    return best
+            run_raw = 0
+    return best, best_raw
 
 
 def _run(blastn, db, fasta):
-    fmt = "6 qseqid sseqid pident length nident mismatch gaps qlen bitscore qseq sseq"
+    fmt = "6 qseqid sseqid pident length nident mismatch gaps qlen bitscore sstart send qseq sseq"
     p = subprocess.run([blastn, "-task", "megablast", "-query", fasta, "-db", db,
                         "-outfmt", fmt, "-max_target_seqs", "5", "-evalue", "1e-5"],
                        capture_output=True, text=True)
     best = {}
     for line in p.stdout.splitlines():
         f = line.split("\t")
-        if len(f) < 11 or not f[1].startswith(REF_ID):
+        if len(f) < 13 or not f[1].startswith(REF_ID):
             continue
         q, bits = f[0], float(f[8])
         if q not in best or bits > best[q]["bitscore"]:
+            lp, lp_raw = _longest_perfect(f[11], f[12], int(f[9]), int(f[10]))
             best[q] = {
                 "pident": float(f[2]), "length": int(f[3]), "nident": int(f[4]),
                 "mismatch": int(f[5]), "gaps": int(f[6]), "qlen": int(f[7]),
-                "bitscore": bits, "longest_perfect": _longest_perfect(f[9], f[10]),
+                "bitscore": bits, "longest_perfect": lp, "longest_perfect_raw": lp_raw,
             }
     return best
 
@@ -136,6 +163,7 @@ def _agg(d, ref_len):
         "mean_coverage_read": statistics.mean(v["length"] / v["qlen"] for v in d.values()),
         "mean_longest_perfect": statistics.mean(v["longest_perfect"] for v in d.values()),
         "median_longest_perfect": statistics.median(v["longest_perfect"] for v in d.values()),
+        "mean_longest_perfect_raw": statistics.mean(v["longest_perfect_raw"] for v in d.values()),
         "mean_read_len": statistics.mean(v["qlen"] for v in d.values()),
         "total_gaps": sum(v["gaps"] for v in d.values()),
     }

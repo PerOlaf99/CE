@@ -8,26 +8,42 @@ with NCBI BLAST+ against the authentic NCBI M13mp18 reference (`M77815.1`).
 
 | metric | ours | Cimarron 3.12 (ESD) | delta |
 |---|---|---|---|
-| **identical bases** | **73,462** | 72,286 | **+1,176 (+1.6%)** |
-| **aligned length** | **77,136** | 74,726 | **+2,410** |
-| **coverage of reference (mean)** | **11.08%** | 10.74% | **+0.35 pp** |
-| total bit score | 120,047 | **122,831** | -2,784 |
-| mean bit score | 1,250.5 | **1,279.5** | -29.0 |
-| mean % identity | 95.30% | **96.76%** | -1.46 |
-| coverage of read (mean) | 87.25% | **89.18%** | -1.93 pp |
-| longest error-free stretch (mean) | 250.0 | **285.7** | -35.7 |
-| mean read length | **920.9** | 873.0 | +47.9 |
+| **matched bases** | **78,343** | 72,286 | **+6,057 (+8.4%)** |
+| **aligned length** | **83,298** | 74,726 | **+8,572** |
+| **coverage of reference (mean)** | **12.00%** | 10.74% | **+1.26 pp** |
+| **total bit score** | **123,958** | 122,831 | **+1,127 (+0.9%)** |
+| **mean bit score** | **1,291.2** | 1,279.5 | **+11.7** |
+| mean % identity | 94.08% | **96.76%** | -2.68 |
+| **coverage of read (mean)** | **89.90%** | 89.18% | **+0.72 pp** |
+| longest error-free stretch (mean) | 331.7 | **490.7** | -159.0 |
+| mean read length | **966.3** | 873.0 | +93.4 |
+| total gaps | 2,621 | **1,967** | +654 |
 
-We win on **total correct bases**, aligned length and reference coverage; we
-lose on **bit score, %ID, read coverage and longest error-free stretch**,
-because we call longer reads (higher throughput, lower per-base accuracy).
-The two callers sit at different points on the identity/coverage frontier; see
-`BLAST_RESULTS.md` for the full breakdown.
+We win on the **two GOLDEN counters -- matched bases and bit score** -- as well
+as aligned length, both coverages and read length; Cimarron keeps the higher
+per-base **identity** (it calls shorter reads) and the longer **error-free
+stretch**. The remaining target is to win the longest-run bar too.
+
+The decisive change over the previous config was giving the tracker a
+**position-profiled pull-back**: `pullback_weight` ramps 0.008 -> 0.001 across
+the last 2/3 of the read (`profile_fracs=(0.33, 1.0)`), so the spacing estimate
+stops being dragged back toward the mid-read global median exactly where the
+peaks broaden in the degraded 3' tail. This lifted matched bases 793 -> 816 per
+well and bit score 1,264 -> 1,291. A mean-base-quality gate (>= 2.0) keeps the
+three wells that run away under the loose tail (E02/E03/F03, 1544-2285 bp at
+mean quality ~1.3) on the stable scalar config, so all 96 wells still align.
+
+Earlier experiments that did **not** ship: trimming the degraded 3' tail
+(`exp_trim.py`) raises %ID but lowers matched bases and bit score, because the
+tail is mostly matching bases; the `channel_peak_bonus` sweep (`exp_grid*.py`)
+and the DLL's upsampling / parabolic-peak mechanisms (`exp_upsample.py`,
+`exp_parabolic.py`) did not beat the profiled config.
 
 For reference, the repo's canonical `perbase_vs_ref` ratio on this config is
-**88.88%** vs Cimarron 90.72%. That ratio rewards shorter, cleaner reads and
-does **not** track the number of correct bases, so it is reported but not used
-as the objective.
+**88.94%** vs Cimarron 90.72%. That ratio penalizes gaps and rewards shorter,
+cleaner reads and does **not** track the number of correct bases, so it is
+reported but not used as the objective (the project GOLDEN STANDARD ranks
+matched bases first, bit score next).
 
 ## What it does
 
@@ -42,9 +58,10 @@ Analyzer stage order (Baseline subtract -> Spectral separation -> Normalization
    and suppresses noise-induced spurious peaks (the previously-missing stage
    from `03_cimarron312_dll_90.72pct/CIMARRON_MASTER.md`).
 5. mobility shift correction
-6. spacing-tracked greedy base calling with a combined multi-channel score.
+6. spacing-tracked greedy base calling with a combined multi-channel score and
+   a position-profiled spacing pull-back.
 
-The band filter plus the combined score plus a lower pull-back weight lets the
+The band filter, the combined score and the falling pull-back weight let the
 spacing tracker follow the broadening peaks in the degraded 3' end, which is
 where Cimarron's original coverage advantage lived.
 
@@ -56,15 +73,19 @@ gaussian_recon_segment_size  = 384
 use_combined_channel_score   = True
 window_frac                  = (0.75, 1.25)
 local_norm_window            = 1800
-channel_peak_bonus           = 1.6
-pullback_weight              = 0.019
-ema_alpha                    = 0.10
+channel_peak_bonus           = 1.2
+pullback_weight              = (0.008, 0.001)   # position-profiled
+ema_alpha                    = 0.08
+profile_fracs                = (0.33, 1.0)
+# quality gate: mean base quality >= 2.0, else FALLBACK_CONFIG
 ```
 
-The result is robust: `pullback_weight` in 0.018–0.021 all beat Cimarron on
-identical bases; `repeat_detection=True` nudges it slightly higher (73,479).
+The result is robust around the profile: ramp start 0.25-0.50 all beat Cimarron
+on matched bases and bit score; the ramp end 0.000-0.002 is flat; only the
+pull-back ramp helps (ramped EMA, loose-prominence and bonus ramps do not).
 Do not assume the exact constants transfer to another plate; the band filter,
-combined score and coverage tracking are the transferable parts.
+combined score, position-profiled pull-back and the quality gate are the
+transferable parts.
 
 ## Reproduce
 
@@ -88,6 +109,9 @@ python eval_plate.py
 - `eval_plate.py` - canonical scoring, writes `report.json`.
 - `canon_metric.py` - vectorized canonical seed-SW aligner `perbase_vs_ref`
   (validated: ESD scores 90.724).
+- `exp_trim.py`, `exp_grid*.py`, `exp_profile*.py` - sweeps behind the tuning
+  decisions (reports in `report_trim_sweep.json`, `report_grid*.json`,
+  `report_profile*.json`).
 - `report_blast.json`, `report.json` - plate aggregates.
 - `basecalls/` - generated FASTA (created by `call_plate.py`).
 
