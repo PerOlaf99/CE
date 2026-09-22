@@ -615,10 +615,16 @@ def gaussian_reconstruction_filter(
 def apply_gaussian_reconstruction_windowed(
     trace: np.ndarray, spacing_curve: np.ndarray, segment_size: int = 512, overlap: int = 64,
     noise_reg: float = 5e-2, sigma_scale: float = 1.0,
+    noise_reg_curve: np.ndarray | None = None,
 ) -> np.ndarray:
     """Apply gaussian_reconstruction_filter in overlapping windows using
     the LOCAL spacing at each window (spacing genuinely drifts over a
-    read), cross-fading overlaps to avoid seams."""
+    read), cross-fading overlaps to avoid seams.
+
+    noise_reg_curve: optional per-sample regularization strength. When given
+    the window uses its local median instead of the scalar `noise_reg`, so the
+    filter can be sharp early in the read (where matched bases are dense) and
+    smoothly regularized in the noisy 3' tail (where substitutions live)."""
     n = trace.shape[0]
     out = np.zeros_like(trace, dtype=float)
     weight = np.zeros(n)
@@ -633,8 +639,9 @@ def apply_gaussian_reconstruction_windowed(
             weight[start:end] += 1.0
             break
         local_spacing = float(np.median(spacing_curve[start:end]))
+        local_reg = float(np.median(noise_reg_curve[start:end])) if noise_reg_curve is not None else noise_reg
         filtered = gaussian_reconstruction_filter(seg, local_spacing, segment_size=seg.shape[0],
-                                                  noise_reg=noise_reg, sigma_scale=sigma_scale)
+                                                  noise_reg=local_reg, sigma_scale=sigma_scale)
 
         w = np.ones(seg.shape[0])
         if overlap > 0 and start > 0:
@@ -968,9 +975,17 @@ def track_bases(
         sig_start_gr, sig_end_gr = detect_signal_region(baseline_subtracted)
         spacing_for_filter = estimate_global_spacing(env_for_spacing, sig_start_gr, sig_end_gr)
         spacing_curve_const = np.full(norm_trace.shape[0], spacing_for_filter)
+        reg_curve = None
+        if (isinstance(gaussian_recon_noise_reg, (tuple, list, np.ndarray))
+                and len(gaussian_recon_noise_reg) == 2
+                and float(gaussian_recon_noise_reg[0]) != float(gaussian_recon_noise_reg[1])):
+            _span_gr = max(1, sig_end_gr - sig_start_gr)
+            _fraco = np.clip((np.arange(norm_trace.shape[0]) - sig_start_gr) / _span_gr, 0.0, 1.0)
+            reg_curve = _ramp_array(gaussian_recon_noise_reg, _fraco, *profile_fracs)
         norm_trace = apply_gaussian_reconstruction_windowed(
             norm_trace, spacing_curve_const, segment_size=gaussian_recon_segment_size,
-            noise_reg=gaussian_recon_noise_reg, sigma_scale=gaussian_recon_sigma_scale,
+            noise_reg=float(np.atleast_1d(gaussian_recon_noise_reg)[0]),
+            sigma_scale=gaussian_recon_sigma_scale, noise_reg_curve=reg_curve,
         )
         norm_trace = np.clip(norm_trace, 0, None)
 

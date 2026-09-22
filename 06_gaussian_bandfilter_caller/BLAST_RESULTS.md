@@ -170,6 +170,13 @@ Negative results that bounded the search:
 * A Richardson-Lucy **iterative** deconvolution was implemented but rejected:
   without the patent's mobility model it amplifies baseline noise into spurious
   peaks and runs the tracker away (`gaussian_recon_iters` removed).
+* **Position-profiled** Wiener regularization (`gaussian_recon_noise_reg` given
+  as a `(start, end)` pair over the read, `exp_regprofile.py` /
+  `report_regprofile.json`) was worse than the scalar on every axis: 11 ramps
+  from sharp-early/smooth-late to the reverse all lost matched bases (808-814
+  vs 816.3) and bit score (1270-1291 vs 1299.8) for at most +17 longest. The
+  scalar `noise_reg=0.06` is kept. The plumbing exists (default off) but is not
+  used.
 * A Pareto scan of **all ~120 tried configurations** (`exp_pareto.py`) found no
   pre-retune setting that dominated the winner; the 96-well frontier was flat
   around matched ~810-820 with longest ~330.
