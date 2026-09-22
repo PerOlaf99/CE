@@ -549,8 +549,15 @@ def band_filter(trace: np.ndarray, spike_width: int = 3) -> np.ndarray:
     return out
 
 
+def _gaussian_psf(spatial_sigma: float, n: int) -> np.ndarray:
+    x = np.arange(n) - n // 2
+    psf = np.exp(-0.5 * (x / max(spatial_sigma, 1e-6)) ** 2)
+    return psf / psf.sum()
+
+
 def gaussian_reconstruction_filter(
-    trace: np.ndarray, spacing: float, segment_size: int = 2048, noise_reg: float = 5e-2
+    trace: np.ndarray, spacing: float, segment_size: int = 2048, noise_reg: float = 5e-2,
+    sigma_scale: float = 1.0,
 ) -> np.ndarray:
     """Frequency-domain Gaussian reconstruction filter for blind
     deconvolution, per the actual Cimarron source (mb.cxx, Univ. of Utah,
@@ -592,9 +599,8 @@ def gaussian_reconstruction_filter(
     spatial_sigma = spacing / K
 
     n = trace.shape[0]
-    x = np.arange(n) - n // 2
-    psf = np.exp(-0.5 * (x / spatial_sigma) ** 2)
-    psf /= psf.sum()
+    spatial_sigma = spatial_sigma * float(sigma_scale)
+    psf = _gaussian_psf(spatial_sigma, n)
     psf_fft = np.fft.rfft(np.fft.ifftshift(psf))
 
     out = np.empty_like(trace, dtype=float)
@@ -608,7 +614,7 @@ def gaussian_reconstruction_filter(
 
 def apply_gaussian_reconstruction_windowed(
     trace: np.ndarray, spacing_curve: np.ndarray, segment_size: int = 512, overlap: int = 64,
-    noise_reg: float = 5e-2,
+    noise_reg: float = 5e-2, sigma_scale: float = 1.0,
 ) -> np.ndarray:
     """Apply gaussian_reconstruction_filter in overlapping windows using
     the LOCAL spacing at each window (spacing genuinely drifts over a
@@ -627,7 +633,8 @@ def apply_gaussian_reconstruction_windowed(
             weight[start:end] += 1.0
             break
         local_spacing = float(np.median(spacing_curve[start:end]))
-        filtered = gaussian_reconstruction_filter(seg, local_spacing, segment_size=seg.shape[0], noise_reg=noise_reg)
+        filtered = gaussian_reconstruction_filter(seg, local_spacing, segment_size=seg.shape[0],
+                                                  noise_reg=noise_reg, sigma_scale=sigma_scale)
 
         w = np.ones(seg.shape[0])
         if overlap > 0 and start > 0:
@@ -875,6 +882,7 @@ def track_bases(
     use_gaussian_reconstruction: bool = False,
     gaussian_recon_noise_reg: float = 0.05,
     gaussian_recon_segment_size: int = 512,
+    gaussian_recon_sigma_scale: float = 1.0,
     position_adaptive_spectral: bool = False,
     use_combined_channel_score: bool = False,
     channel_peak_bonus: float | tuple[float, float] = 0.5,  # tested across all 12 wells: net negative on
@@ -888,6 +896,7 @@ def track_bases(
     prune_merge_frac: float = 1.4,
     prune_height_frac: float = 0.9,
     prune_max_iter: int = 4,
+    use_spacing_anchor_curve: bool = False,
 ) -> tuple[str, list[float], list[TrackedBase]]:
     """Walk the trace predicting each next base position from a running
     local spacing estimate. Returns (sequence, qualities, tracked_bases).
@@ -961,7 +970,7 @@ def track_bases(
         spacing_curve_const = np.full(norm_trace.shape[0], spacing_for_filter)
         norm_trace = apply_gaussian_reconstruction_windowed(
             norm_trace, spacing_curve_const, segment_size=gaussian_recon_segment_size,
-            noise_reg=gaussian_recon_noise_reg,
+            noise_reg=gaussian_recon_noise_reg, sigma_scale=gaussian_recon_sigma_scale,
         )
         norm_trace = np.clip(norm_trace, 0, None)
 
@@ -992,6 +1001,27 @@ def track_bases(
         best_channel = boosted.argmax(axis=1)
 
     global_spacing = estimate_global_spacing(envelope, sig_start, sig_end)
+    anchor_curve = None
+    if use_spacing_anchor_curve:
+        # A single global median is too WIDE for the primer-adjacent region
+        # (small fragments migrate closer together, so early spacing is
+        # genuinely smaller than the read-wide median) and too NARROW for the
+        # far tail. Fit a smooth spacing-vs-position curve from a cheap
+        # first-pass track and pull the EMA toward that local value instead of
+        # a constant -- an online version of the patent's "expected spacing
+        # curve". The pre-track itself runs with the constant anchor (this
+        # flag defaults off there), so it stays a pure trend estimate.
+        _, _, pre_tracked = track_bases(
+            trace, base_order=base_order, spectral_separation_matrix=None,
+            use_gaussian_reconstruction=False, position_adaptive_spectral=False,
+            auto_trim=False, smoothing_window=smoothing_window,
+        )
+        if len(pre_tracked) >= 8:
+            ppos = np.array([b.position for b in pre_tracked[1:]], dtype=float)
+            psp = np.array([b.spacing_used for b in pre_tracked[1:]], dtype=float)
+            coeffs = np.polyfit(ppos, psp, deg=2 if len(ppos) >= 12 else 1)
+            anchor_curve = np.clip(np.polyval(coeffs, np.arange(n)),
+                                   global_spacing * 0.4, global_spacing * 2.0)
     pos = sig_start
     spacing = global_spacing  # start from the robust global estimate, not a fixed constant
     misses = 0
@@ -1030,12 +1060,13 @@ def track_bases(
         misses = 0
         observed_spacing = local_peak_pos - pos
         spacing = (1 - _ea) * spacing + _ea * observed_spacing
-        # Pull back toward the robust global estimate every step, so a
+        # Pull back toward the robust local estimate every step, so a
         # noisy local stretch can nudge the estimate but can't make it
         # drift away unboundedly -- it's always being tugged back toward
-        # what the whole read's spacing actually looks like.
-        spacing = (1 - _pw) * spacing + _pw * global_spacing
-        spacing = float(np.clip(spacing, global_spacing * 0.5, global_spacing * 2.0))
+        # what the read's spacing actually looks like at this position.
+        _anchor = float(anchor_curve[pos]) if anchor_curve is not None else global_spacing
+        spacing = (1 - _pw) * spacing + _pw * _anchor
+        spacing = float(np.clip(spacing, _anchor * 0.5, _anchor * 2.0))
 
         ch = int(best_channel[local_peak_pos])
         results.append(TrackedBase(

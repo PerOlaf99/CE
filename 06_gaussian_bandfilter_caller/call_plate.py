@@ -6,6 +6,8 @@ Configuration tuned to maximize correctly-called bases measured by NCBI BLAST+
     basecaller                       track_bases (spacing caller)
     gaussian reconstruction          ON   (the "band filter" stage)
     gaussian_recon_segment_size      384
+    gaussian_recon_noise_reg         0.06  (sharper-but-regularized Wiener)
+    gaussian_recon_sigma_scale       1.05
     combined channel score           ON
     window_frac                      (0.75, 1.25)
     local_norm_window                1800
@@ -17,23 +19,26 @@ Configuration tuned to maximize correctly-called bases measured by NCBI BLAST+
                                      the stable scalar config (see FALLBACK_CONFIG)
 
 Result (96 wells, NCBI BLAST+ megablast, SNP-neutral longest run):
-    matched bases     78,343   vs Cimarron 3.12  72,286   (+6,057, +8.4%)
-    aligned length    83,298   vs               74,726   (+8,572)
-    coverage of ref   12.00%   vs               10.74%   (+1.26 pp)
-    total bit score   123,958  vs               122,831  (+1,127, +0.9%)
-    mean bit score    1,291.2  vs               1,279.5  (+11.7)
-    mean identity     94.08%   vs               96.76%   (-2.68)
-    coverage of read  89.90%   vs               89.18%   (+0.72 pp)
-    longest error-free 331.7   vs               490.7    (-159.0)
-    mean read length  966.3    vs               873.0
+    matched bases     78,362   vs Cimarron 3.12  72,286   (+6,076, +8.4%)
+    aligned length    83,116   vs               74,726   (+8,390)
+    coverage of ref   11.94%   vs               10.74%   (+1.20 pp)
+    total bit score   124,783  vs               122,831  (+1,952, +1.6%)
+    mean bit score    1,299.8  vs               1,279.5  (+20.3)
+    mean identity     94.30%   vs               96.76%   (-2.46)
+    coverage of read  90.04%   vs               89.18%   (+0.86 pp)
+    longest error-free 363.9   vs               490.7    (-126.7)
+    mean read length  962.5    vs               873.0
 
 No reference and no ML model are used at call time: pure DSP + peak tracking.
-The caller now beats Cimarron 3.12 on the two GOLDEN counters -- matched bases
-and bit score -- at the cost of per-base identity. The position-profiled
-pull-back (loosen 0.008 -> 0.001 over the last 2/3 of the read) is what
-recovers the degraded 3' tail; the mean-quality gate keeps the three wells that
-run away under the loose tail (E02/E03/F03) on the stable scalar config so all
-96 wells still align. See exp_profile.py / exp_profile2.py.
+The caller beats Cimarron 3.12 on the two GOLDEN counters -- matched bases and
+bit score. Two mechanisms do the work: the position-profiled pull-back
+(loosen 0.008 -> 0.001 over the last 2/3 of the read) recovers the degraded 3'
+tail, and retuning the Wiener band filter (sigma_scale 1.05, noise_reg 0.06)
+sharpens the reconstruction just enough to cut substitutions and lengthen the
+error-free runs without losing matched bases. The mean-quality gate keeps the
+three wells that run away under the loose tail (E02/E03/F03) on the stable
+scalar config so all 96 wells still align. See exp_profile2.py / exp_deconv.py
+/ exp_deconv2.py / exp_anchor.py.
 
 Usage:
     python call_plate.py [--rsd-dir ../MB1000_M13_DT] [--out basecalls]
@@ -55,6 +60,8 @@ from cimarron_basecaller import track_bases
 WIN_CONFIG = dict(
     use_gaussian_reconstruction=True,
     gaussian_recon_segment_size=384,
+    gaussian_recon_noise_reg=0.06,
+    gaussian_recon_sigma_scale=1.05,
     use_combined_channel_score=True,
     window_frac=(0.75, 1.25),
     local_norm_window=1800,

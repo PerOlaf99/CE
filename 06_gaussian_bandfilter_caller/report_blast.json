@@ -3,18 +3,18 @@
   "reference_length": 7250,
   "ours": {
     "n_wells": 96,
-    "identical_bases": 78343,
-    "aligned_length": 83298,
-    "total_bitscore": 123958.0,
-    "mean_pident": 94.08078125,
-    "mean_bitscore": 1291.2291666666667,
-    "mean_coverage_ref": 0.11968103448275862,
-    "mean_coverage_read": 0.8987651797570925,
-    "mean_longest_perfect": 331.6979166666667,
-    "median_longest_perfect": 309.0,
-    "mean_longest_perfect_raw": 331.6979166666667,
-    "mean_read_len": 966.34375,
-    "total_gaps": 2621
+    "identical_bases": 78362,
+    "aligned_length": 83116,
+    "total_bitscore": 124783.0,
+    "mean_pident": 94.30414583333334,
+    "mean_bitscore": 1299.8229166666667,
+    "mean_coverage_ref": 0.11941954022988506,
+    "mean_coverage_read": 0.9004223134678171,
+    "mean_longest_perfect": 363.9375,
+    "median_longest_perfect": 330.5,
+    "mean_longest_perfect_raw": 363.9375,
+    "mean_read_len": 962.5104166666666,
+    "total_gaps": 2576
   },
   "cimarron312_esd": {
     "n_wells": 96,
@@ -32,15 +32,15 @@
     "total_gaps": 1967
   },
   "delta": {
-    "identical_bases": 6057,
-    "aligned_length": 8572,
-    "total_bitscore": 1127.0,
-    "mean_pident": -2.6821041666666616,
-    "mean_bitscore": 11.739583333333485,
-    "mean_coverage_ref": 0.012316091954022987,
-    "mean_coverage_read": 0.006982525247834714,
-    "mean_longest_perfect": -158.95833333333331,
-    "mean_read_len": 93.375,
-    "total_gaps": 654
+    "identical_bases": 6076,
+    "aligned_length": 8390,
+    "total_bitscore": 1952.0,
+    "mean_pident": -2.458739583333326,
+    "mean_bitscore": 20.333333333333485,
+    "mean_coverage_ref": 0.01205459770114943,
+    "mean_coverage_read": 0.008639658958559338,
+    "mean_longest_perfect": -126.71875,
+    "mean_read_len": 89.54166666666663,
+    "total_gaps": 609
   }
 }

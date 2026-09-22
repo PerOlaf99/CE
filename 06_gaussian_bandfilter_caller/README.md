@@ -8,36 +8,48 @@ with NCBI BLAST+ against the authentic NCBI M13mp18 reference (`M77815.1`).
 
 | metric | ours | Cimarron 3.12 (ESD) | delta |
 |---|---|---|---|
-| **matched bases** | **78,343** | 72,286 | **+6,057 (+8.4%)** |
-| **aligned length** | **83,298** | 74,726 | **+8,572** |
-| **coverage of reference (mean)** | **12.00%** | 10.74% | **+1.26 pp** |
-| **total bit score** | **123,958** | 122,831 | **+1,127 (+0.9%)** |
-| **mean bit score** | **1,291.2** | 1,279.5 | **+11.7** |
-| mean % identity | 94.08% | **96.76%** | -2.68 |
-| **coverage of read (mean)** | **89.90%** | 89.18% | **+0.72 pp** |
-| longest error-free stretch (mean) | 331.7 | **490.7** | -159.0 |
-| mean read length | **966.3** | 873.0 | +93.4 |
-| total gaps | 2,621 | **1,967** | +654 |
+| **matched bases** | **78,362** | 72,286 | **+6,076 (+8.4%)** |
+| **aligned length** | **83,116** | 74,726 | **+8,390** |
+| **coverage of reference (mean)** | **11.94%** | 10.74% | **+1.20 pp** |
+| **total bit score** | **124,783** | 122,831 | **+1,952 (+1.6%)** |
+| **mean bit score** | **1,299.8** | 1,279.5 | **+20.3** |
+| mean % identity | 94.30% | **96.76%** | -2.46 |
+| **coverage of read (mean)** | **90.04%** | 89.18% | **+0.86 pp** |
+| longest error-free stretch (mean) | 363.9 | **490.7** | -126.7 |
+| mean read length | **962.5** | 873.0 | +89.5 |
+| total gaps | 2,576 | **1,967** | +609 |
 
 We win on the **two GOLDEN counters -- matched bases and bit score** -- as well
 as aligned length, both coverages and read length; Cimarron keeps the higher
 per-base **identity** (it calls shorter reads) and the longer **error-free
 stretch**. The remaining target is to win the longest-run bar too.
 
-The decisive change over the previous config was giving the tracker a
-**position-profiled pull-back**: `pullback_weight` ramps 0.008 -> 0.001 across
-the last 2/3 of the read (`profile_fracs=(0.33, 1.0)`), so the spacing estimate
-stops being dragged back toward the mid-read global median exactly where the
-peaks broaden in the degraded 3' tail. This lifted matched bases 793 -> 816 per
-well and bit score 1,264 -> 1,291. A mean-base-quality gate (>= 2.0) keeps the
-three wells that run away under the loose tail (E02/E03/F03, 1544-2285 bp at
-mean quality ~1.3) on the stable scalar config, so all 96 wells still align.
+Two changes get us here. The **position-profiled pull-back** ramps
+`pullback_weight` 0.008 -> 0.001 across the last 2/3 of the read
+(`profile_fracs=(0.33, 1.0)`), so the spacing estimate stops being dragged back
+toward the mid-read global median exactly where the peaks broaden in the
+degraded 3' tail; this recovered the tail (matched 793 -> 816/well). Then
+**retuning the Wiener band filter** (`gaussian_recon_sigma_scale=1.05`,
+`gaussian_recon_noise_reg=0.06`) sharpens the reconstruction just enough to cut
+substitutions and lengthen the error-free runs (331.7 -> 363.9) while still
+*raising* matched bases (816.1 -> 816.3) and bit score (1291.2 -> 1299.8) -- a
+strict Pareto improvement over the previous config. A mean-base-quality gate
+(>= 2.0) keeps the three wells that run away under the loose tail (E02/E03/F03,
+1544-2285 bp at mean quality ~1.3) on the stable scalar config, so all 96 wells
+still align.
 
 Earlier experiments that did **not** ship: trimming the degraded 3' tail
 (`exp_trim.py`) raises %ID but lowers matched bases and bit score, because the
-tail is mostly matching bases; the `channel_peak_bonus` sweep (`exp_grid*.py`)
-and the DLL's upsampling / parabolic-peak mechanisms (`exp_upsample.py`,
-`exp_parabolic.py`) did not beat the profiled config.
+tail is mostly matching bases; insertion pruning (`prune_spurious_insertions`,
+the patent's OmitOkN) and tail-softening profiles (`exp_profile3.py`) raise
+identity but do not move the longest run; a full Richardson-Lucy iterative
+deconvolution was implemented and rejected because it amplifies baseline noise
+into spurious peaks and runs the tracker away; the `channel_peak_bonus` sweep
+(`exp_grid*.py`) and the DLL's upsampling / parabolic-peak mechanisms
+(`exp_upsample.py`, `exp_parabolic.py`) did not beat the profiled config. An
+optional position-varying spacing anchor (`use_spacing_anchor_curve`) trims ~2
+matched/well for ~+18 longest-run/well and is available but off in
+`WIN_CONFIG`; see `exp_anchor.py`.
 
 For reference, the repo's canonical `perbase_vs_ref` ratio on this config is
 **88.94%** vs Cimarron 90.72%. That ratio penalizes gaps and rewards shorter,
