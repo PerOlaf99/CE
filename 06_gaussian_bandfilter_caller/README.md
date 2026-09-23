@@ -24,6 +24,41 @@ as aligned length, both coverages and read length; Cimarron keeps the higher
 per-base **identity** (it calls shorter reads) and the longer **error-free
 stretch**. The remaining target is to win the longest-run bar too.
 
+## Precision mode: longest error-free run / %ID
+
+`call_plate.py --mode precision` (config `WIN_CONFIG_PRECISION`) is the opposite
+corner of the frontier. The operator prioritised the **longest error-free run
+and per-base identity**, accepting a shorter read and fewer matched bases to get
+there. It keeps the same reconstruction and peak tracker as `WIN_CONFIG` but
+
+- raises the Wiener regularization `gaussian_recon_noise_reg` 0.06 -> **0.128**
+  (sharper-smoothed peaks place more bands exactly right),
+- enables the **spacing-anchor curve** (`use_spacing_anchor_curve`) to stabilise
+  the local spacing estimate, and
+- applies a deep **38th-percentile quality trim** that discards the degraded
+  read ends where nearly all residual errors live.
+
+The regularization and trim depth were swept jointly (`exp_prectrimN.py`): the
+longest run peaks sharply at reg ~0.128 / pct 38 and collapses past reg 0.14.
+
+| metric | golden mode | **precision mode** | Cimarron 3.12 |
+|---|---|---|---|
+| matched bases | **78,362** | 59,403 | 72,286 |
+| total bit score | **124,783** | 104,920 | 122,831 |
+| mean % identity | 94.30% | **98.19%** | 96.76% |
+| longest error-free run (mean) | 363.9 | **473.1** | 490.7 |
+| longest error-free run (median) | 330.5 | **500** | 519 |
+| mean read length | **962.5** | 627.4 | 873.0 |
+| total gaps | 2,576 | **787** | 1,967 |
+| canonical `perbase_vs_ref` | 89.19% | **97.81%** | 90.72% |
+
+Precision mode **wins % identity by +1.43 pp over Cimarron** (98.19 vs 96.76)
+and cuts total gaps by 60%, closing the longest-run gap from -126.7 to -17.6 bp
+(3.6%). It cannot win the longest bar outright: a reference-free per-well
+choice between the golden and precision calls would reach an oracle mean of
+486.9 (vs Cimarron 490.7), but every quality-based proxy tested (`exp_select.py`,
+`report_select.json`) picks worse than pure precision, so no such selector ships.
+
 Two changes get us here. The **position-profiled pull-back** ramps
 `pullback_weight` 0.008 -> 0.001 across the last 2/3 of the read
 (`profile_fracs=(0.33, 1.0)`), so the spacing estimate stops being dragged back
@@ -102,11 +137,17 @@ transferable parts.
 ## Reproduce
 
 ```bash
-# basecall the plate -> basecalls/*.fasta
+# basecall the plate -> basecalls/*.fasta (golden: matched-bases / bit optimum)
 python call_plate.py
+
+# longest-run / %ID optimum -> basecalls_precision/*.fasta
+python call_plate.py --mode precision
 
 # authoritative BLAST+ comparison -> report_blast.json
 BLAST_DIR=/path/to/ncbi-blast-*/bin python blast_eval.py
+
+# precision-mode scoreboard -> report_precision_mode.json
+BLAST_DIR=/path/to/ncbi-blast-*/bin python exp_scoreprec.py
 
 # canonical ratio + Cimarron bar -> report.json
 python eval_plate.py
@@ -116,7 +157,8 @@ python eval_plate.py
 
 - `cimarron_basecaller/` - vendored spacing-tracker caller (shipped with the
   user-provided MegaBACE Cimarron software bundle; numpy/scipy only on this path).
-- `call_plate.py` - applies `WIN_CONFIG`, writes per-well FASTA.
+- `call_plate.py` - applies `WIN_CONFIG` (default) or `WIN_CONFIG_PRECISION`
+  (`--mode precision`), writes per-well FASTA.
 - `blast_eval.py` - NCBI BLAST+ comparison, writes `report_blast.json`.
 - `eval_plate.py` - canonical scoring, writes `report.json`.
 - `canon_metric.py` - vectorized canonical seed-SW aligner `perbase_vs_ref`

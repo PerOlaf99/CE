@@ -186,3 +186,49 @@ The band-filter retune already closed a third of the longest-run gap; closing
 the rest likely needs the patent's full blind deconvolution with an
 overshoot/mobility model, or the optional spacing-anchor curve combined with a
 softer filter (documented above, available but traded against matched bases).
+
+## Precision mode: swapping the objective to longest-run / %ID
+
+The operator then re-prioritised: keep improving, but optimise the **longest
+error-free run and % identity**, giving up read length (and matched bases) to
+get there. `call_plate.py --mode precision` uses `WIN_CONFIG_PRECISION`
+(`gaussian_recon_noise_reg=0.128`, `use_spacing_anchor_curve=True`,
+`trim_quality_percentile=38`) and scores as follows (96 wells, same BLAST+ /
+M77815.1 harness, `report_precision_mode.json`):
+
+| metric | golden | **precision** | Cimarron 3.12 |
+|---|---|---|---|
+| matched bases | 78,362 | 59,403 | 72,286 |
+| total bit score | 124,783 | 104,920 | 122,831 |
+| mean % identity | 94.30% | **98.19%** | 96.76% |
+| longest error-free run (mean) | 363.9 | **473.1** | 490.7 |
+| longest error-free run (median) | 330.5 | **500** | 519 |
+| mean read length | 962.5 | 627.4 | 873.0 |
+| total gaps | 2,576 | **787** | 1,967 |
+| canonical `perbase_vs_ref` | 89.19% | **97.81%** | 90.72% |
+
+What drove it (`exp_precision.py`, `exp_trimprec.py`, `exp_prectrim2..7.py`,
+`report_pctrim2..7.json`, `report_precision.json`):
+
+- Trimming the degraded ends **raises** both %ID and (surprisingly) the longest
+  run: `mid` (reg 0.09) went 401/94.8 untrimmed -> 423/97.2 at a 25th-pct trim.
+  Trimming removes error-dense end regions, so the surviving block has fewer
+  break points.
+- Under the trim, **stronger regularization is a win**, the opposite of the
+  untrimmed regime. Longest climbed monotonically 434 (reg 0.095) -> 459 (0.12)
+  -> 465 (0.13) while %ID held ~97.1, then collapsed past reg 0.14 (357 at 0.15)
+  as peaks broadened too far to resolve.
+- Deeper trim at the peak kept helping: at reg 0.13 the longest run rose
+  470 (pct 32) -> 471.8 (pct 38) while %ID rose 97.70 -> 98.19, then fell
+  (pct 50: 439.8 / 99.03). The shipped point (reg 0.128 / pct 38) is 473.1 /
+  98.19.
+- **Negative results.** Expected-spacing insertion pruning
+  (`prune_expected_spacing`; feeds the anchor curve as the yardstick so the
+  OmitOkN test actually fires) raises %ID to 98.40 but leaves the longest run
+  unchanged (469.0). A reference-free per-well selector between the golden and
+  precision calls (`exp_select.py`, `report_select.json`) would reach an oracle
+  mean longest of 486.9, but every quality-run proxy tested picks worse than
+  pure precision (best 464.6), so no selector ships. Trim depth is irrelevant
+  to the ~9 low-quality wells that drag the mean (H10/H04/G01/B10/C08/F05/G07/
+  G02/D06) -- they call badly at every setting, which is the remaining limit.
+

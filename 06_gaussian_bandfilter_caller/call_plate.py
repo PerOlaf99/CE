@@ -90,11 +90,30 @@ FALLBACK_CONFIG = dict(
 )
 QUALITY_GATE = 2.0
 
+# Precision mode: maximize the LONGEST ERROR-FREE RUN and %IDENTITY, giving up
+# read length (and matched bases) to get there. Same reconstruction/peak
+# tracking as WIN_CONFIG, but (a) much stronger Wiener regularization
+# (noise_reg 0.06 -> 0.128; the sharper-smoothed peaks place more bands
+# exactly right), (b) the quadratic spacing-anchor curve from a cheap
+# pre-track, and (c) a deep 38th-percentile quality trim that discards the
+# degraded read ends where nearly all residual errors live. Net effect on the
+# 96-well plate (BLAST+ megablast vs M77815.1): longest error-free run
+# 363.9 -> 473.1 and %ID 94.30 -> 98.19, at the cost of mean read length
+# 963 -> 627 and matched bases 816 -> 619 per well. Regularization and trim
+# depth were swept jointly (exp_prectrimN.py); longest peaks sharply at
+# reg ~0.128 / pct 38 and collapses past reg 0.14.
+WIN_CONFIG_PRECISION = dict(WIN_CONFIG)
+WIN_CONFIG_PRECISION.update(
+    gaussian_recon_noise_reg=0.128,
+    use_spacing_anchor_curve=True,
+    trim_quality_percentile=38.0,
+)
 
-def basecall_well(path):
+
+def basecall_well(path, config=WIN_CONFIG):
     rsd = read_rsd(path)
     trace, order = to_acgt_trace(rsd, base_order="TGCA")
-    seq, quals, _bands = track_bases(trace, base_order=order, **WIN_CONFIG)
+    seq, quals, _bands = track_bases(trace, base_order=order, **config)
     if len(quals) == 0 or float(np.mean(quals)) < QUALITY_GATE:
         seq, quals, _bands = track_bases(trace, base_order=order, **FALLBACK_CONFIG)
     return seq, quals
@@ -104,14 +123,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rsd-dir", default=os.path.join(_HERE, "..", "MB1000_M13_DT"))
     ap.add_argument("--out", default=os.path.join(_HERE, "basecalls"))
+    ap.add_argument("--mode", choices=("golden", "precision"), default="golden",
+                    help="golden = matched-bases/bit-score optimum (default); "
+                         "precision = longest-error-free-run/%ID optimum")
     args = ap.parse_args()
+    config = WIN_CONFIG if args.mode == "golden" else WIN_CONFIG_PRECISION
     os.makedirs(args.out, exist_ok=True)
     wells = sorted(os.path.basename(f)[:-4] for f in glob.glob(os.path.join(args.rsd_dir, "*.rsd")))
     if not wells:
         raise SystemExit("no .rsd files found in %s" % args.rsd_dir)
     fasta = []
     for w in wells:
-        seq, quals = basecall_well(os.path.join(args.rsd_dir, w + ".rsd"))
+        seq, quals = basecall_well(os.path.join(args.rsd_dir, w + ".rsd"), config)
         with open(os.path.join(args.out, w + ".fasta"), "w") as fh:
             fh.write(">%s len=%d\n" % (w, len(seq)))
             for i in range(0, len(seq), 60):

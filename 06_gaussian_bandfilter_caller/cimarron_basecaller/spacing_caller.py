@@ -815,6 +815,7 @@ def prune_spurious_insertions(
     merge_frac: float = 1.4,
     height_frac: float = 0.9,
     max_iter: int = 4,
+    expected: np.ndarray | None = None,
 ) -> list[TrackedBase]:
     """Fuzzy insertion detection ("OmitOkN" in the real module names).
 
@@ -828,6 +829,13 @@ def prune_spurious_insertions(
     spurious insertion deletes a gap column, which merges the flanking
     matching runs -- raising identity and the longest error-free run without
     removing any true match.
+
+    `expected`, when given, is a per-scan-position array of the TRUE local
+    band spacing (e.g. the spacing-anchor curve). Using it instead of the
+    tracker's own `spacing_used` is essential: in an over-called region the
+    adaptive estimate shrinks to match the overcalls, so it can never flag
+    them -- the earlier version using `spacing_used` fired on only ~1% of the
+    real insertions.
 
     Iterates until no more candidates (or `max_iter`), so runs of overcalls
     collapse one at a time.
@@ -845,7 +853,10 @@ def prune_spurious_insertions(
             if d1 <= 0 or d2 <= 0:
                 i += 1
                 continue
-            exp = b.spacing_used if b.spacing_used and b.spacing_used > 0 else (d1 + d2) / 2.0
+            if expected is not None and 0 <= b.position < len(expected):
+                exp = float(expected[b.position])
+            else:
+                exp = b.spacing_used if b.spacing_used and b.spacing_used > 0 else (d1 + d2) / 2.0
             if (d1 + d2) < merge_frac * exp and b.height < height_frac * min(a.height, c.height):
                 del out[i]
                 removed = True
@@ -903,6 +914,7 @@ def track_bases(
     prune_merge_frac: float = 1.4,
     prune_height_frac: float = 0.9,
     prune_max_iter: int = 4,
+    prune_expected_spacing: bool = False,
     use_spacing_anchor_curve: bool = False,
 ) -> tuple[str, list[float], list[TrackedBase]]:
     """Walk the trace predicting each next base position from a running
@@ -1017,7 +1029,7 @@ def track_bases(
 
     global_spacing = estimate_global_spacing(envelope, sig_start, sig_end)
     anchor_curve = None
-    if use_spacing_anchor_curve:
+    if use_spacing_anchor_curve or prune_expected_spacing:
         # A single global median is too WIDE for the primer-adjacent region
         # (small fragments migrate closer together, so early spacing is
         # genuinely smaller than the read-wide median) and too NARROW for the
@@ -1098,7 +1110,8 @@ def track_bases(
     if prune_insertions and results:
         results = prune_spurious_insertions(results, merge_frac=prune_merge_frac,
                                             height_frac=prune_height_frac,
-                                            max_iter=prune_max_iter)
+                                            max_iter=prune_max_iter,
+                                            expected=anchor_curve if prune_expected_spacing else None)
 
     if auto_trim and results:
         if trim_method == "mott":

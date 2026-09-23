@@ -37,7 +37,7 @@ import urllib.request
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
-CALLS = os.path.join(_HERE, "basecalls")
+CALLS = os.environ.get("CALLS_DIR") or os.path.join(_HERE, "basecalls")
 ESD = os.path.join(_REPO, "ground_truth", "MB1000_M13_DT_Cp312_MD1")
 RSD = os.path.join(_REPO, "MB1000_M13_DT")
 WORK = os.path.join(_HERE, "blast_work")
