@@ -1,0 +1,42 @@
+{
+  "n_wells": 96,
+  "identical_bases": 59403,
+  "aligned_length": 60503,
+  "total_bitscore": 104920.0,
+  "mean_pident": 98.18972916666667,
+  "mean_bitscore": 1092.9166666666667,
+  "mean_coverage_ref": 0.08692959770114943,
+  "mean_coverage_read": 1.0046156288989676,
+  "mean_longest_perfect": 473.0833333333333,
+  "median_longest_perfect": 500.0,
+  "mean_longest_perfect_raw": 473.0833333333333,
+  "mean_read_len": 627.3541666666666,
+  "total_gaps": 787,
+  "mean_matched": 618.78125,
+  "perbase_vs_ref": 97.80767659228195,
+  "mode": "precision",
+  "config": {
+    "use_gaussian_reconstruction": true,
+    "gaussian_recon_segment_size": 384,
+    "gaussian_recon_noise_reg": 0.128,
+    "gaussian_recon_sigma_scale": 1.05,
+    "use_combined_channel_score": true,
+    "window_frac": [
+      0.75,
+      1.25
+    ],
+    "local_norm_window": 1800,
+    "channel_peak_bonus": 1.2,
+    "pullback_weight": [
+      0.008,
+      0.001
+    ],
+    "ema_alpha": 0.08,
+    "profile_fracs": [
+      0.33,
+      1.0
+    ],
+    "use_spacing_anchor_curve": true,
+    "trim_quality_percentile": 38.0
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "metric": "NCBI BLAST+ megablast vs M77815.1 (M13mp18)",
+  "reference_length": 7250,
+  "ours": {
+    "n_wells": 96,
+    "identical_bases": 78362,
+    "aligned_length": 83116,
+    "total_bitscore": 124783.0,
+    "mean_pident": 94.30414583333334,
+    "mean_bitscore": 1299.8229166666667,
+    "mean_coverage_ref": 0.11941954022988506,
+    "mean_coverage_read": 0.9004223134678171,
+    "mean_longest_perfect": 363.9375,
+    "median_longest_perfect": 330.5,
+    "mean_longest_perfect_raw": 363.9375,
+    "mean_read_len": 962.5104166666666,
+    "total_gaps": 2576
+  },
+  "cimarron312_esd": {
+    "n_wells": 96,
+    "identical_bases": 72286,
+    "aligned_length": 74726,
+    "total_bitscore": 122831.0,
+    "mean_pident": 96.76288541666666,
+    "mean_bitscore": 1279.4895833333333,
+    "mean_coverage_ref": 0.10736494252873563,
+    "mean_coverage_read": 0.8917826545092578,
+    "mean_longest_perfect": 490.65625,
+    "median_longest_perfect": 519.0,
+    "mean_longest_perfect_raw": 490.65625,
+    "mean_read_len": 872.96875,
+    "total_gaps": 1967
+  },
+  "delta": {
+    "identical_bases": 6076,
+    "aligned_length": 8390,
+    "total_bitscore": 1952.0,
+    "mean_pident": -2.458739583333326,
+    "mean_bitscore": 20.333333333333485,
+    "mean_coverage_ref": 0.01205459770114943,
+    "mean_coverage_read": 0.008639658958559338,
+    "mean_longest_perfect": -126.71875,
+    "mean_read_len": 89.54166666666663,
+    "total_gaps": 609
+  }
+}

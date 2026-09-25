@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "megabace"
+version = "0.1.0"
+description = "Basecalling for GE Healthcare MegaBACE 1000 RSD files"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+]
+
+[project.scripts]
+rsdbasecall = "megabace.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["megabace*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

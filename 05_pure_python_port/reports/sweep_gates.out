@@ -1,0 +1,11 @@
+baseline                           mean 92.61% med 92.65% min 89.17% max 95.72% I=52 D=2040 N=474
+spacing_min_frac=0.35              mean 92.55% med 92.47% min 89.17% max 95.70% I=52 D=2070 N=508
+spacing_min_frac=0.3               mean 92.32% med 92.31% min 88.91% max 95.70% I=52 D=2162 N=545
+spacing_min_frac=0.25              mean 92.32% med 92.31% min 88.91% max 95.70% I=52 D=2162 N=551
+spacing_min_frac=0.2               mean 92.29% med 92.31% min 88.91% max 95.70% I=52 D=2177 N=552
+prominence_mult=7                  mean 92.83% med 92.94% min 89.82% max 95.51% I=75 D=1945 N=528
+prominence_mult=6                  mean 92.79% med 92.62% min 89.93% max 96.02% I=107 D=1948 N=573
+prominence_mult=5                  mean 92.75% med 92.54% min 89.88% max 96.02% I=147 D=1910 N=644
+prominence_mult=4                  mean 92.42% med 92.32% min 88.43% max 95.54% I=212 D=1956 N=714
+floor_mult=1.5                     mean 92.14% med 91.99% min 88.58% max 95.31% I=140 D=2081 N=568
+floor_mult=1.0                     mean 91.85% med 91.65% min 88.40% max 95.31% I=231 D=2048 N=616

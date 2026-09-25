@@ -1,0 +1,5 @@
+pm=7 baseline                      mean 92.83% med 92.94% min 89.82% max 95.51% I=75 D=1945 N=528
+pm=7 + gap_rescan                  mean 92.08% med 92.17% min 86.59% max 94.97% I=539 D=1490 N=1202
+pm=7 + gr(ratio=1.4)               mean 89.06% med 89.18% min 84.37% max 92.10% I=1732 D=1202 N=1901
+pm=7 + gr(ratio=1.8)               mean 93.38% med 93.20% min 89.96% max 96.44% I=141 D=1609 N=881
+pm=7 + gr(prom=3)                  mean 92.21% med 92.21% min 88.53% max 94.88% I=456 D=1576 N=1157

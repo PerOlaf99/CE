@@ -1,0 +1,9 @@
+baseline                           mean 93.40% med 93.20% min 89.98% max 96.44% I=144 D=1597 N=908
+a_dominance_radius=0               mean 93.21% med 93.04% min 89.98% max 96.23% I=182 D=1622 N=645
+a_dominance_radius=1               mean 93.27% med 93.05% min 90.16% max 96.36% I=188 D=1587 N=954
+t_dominance_radius=0               mean 93.40% med 93.20% min 89.98% max 96.44% I=144 D=1597 N=908
+t_dominance_radius=2               mean 92.92% med 92.87% min 89.44% max 96.23% I=131 D=1713 N=981
+dominance=0.85                     mean 93.40% med 93.44% min 89.98% max 96.57% I=164 D=1517 N=1407
+dominance=0.95                     mean 93.47% med 93.10% min 89.98% max 96.44% I=148 D=1547 N=1082
+a_dr=0,dom=0.85                    mean 93.28% med 92.99% min 89.98% max 96.36% I=194 D=1531 N=1188
+a_dr=1,dom=0.85                    mean 93.25% med 92.99% min 90.16% max 96.36% I=204 D=1517 N=1479

@@ -1,0 +1,384 @@
+{
+  "configs": {
+    "base": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.1
+    },
+    "ema0.06": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.06
+    },
+    "ema0.08": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.08
+    },
+    "ema0.14": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.14
+    },
+    "pb0.012": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.012,
+      "ema_alpha": 0.1
+    },
+    "pb0.030": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.03,
+      "ema_alpha": 0.1
+    },
+    "pb0.045": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.045,
+      "ema_alpha": 0.1
+    },
+    "bonus1.2": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.2,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.1
+    },
+    "bonus2.1": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 2.1,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.1
+    },
+    "win0.70_1.30": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.7,
+        1.3
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.1
+    },
+    "win0.82_1.18": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.82,
+        1.18
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.1
+    },
+    "nnw1200": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1200,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.1
+    },
+    "nnw2400": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": true,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 2400,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.1
+    },
+    "no_comb": {
+      "use_gaussian_reconstruction": true,
+      "gaussian_recon_segment_size": 384,
+      "use_combined_channel_score": false,
+      "window_frac": [
+        0.75,
+        1.25
+      ],
+      "local_norm_window": 1800,
+      "channel_peak_bonus": 1.6,
+      "pullback_weight": 0.019,
+      "ema_alpha": 0.1
+    }
+  },
+  "results": {
+    "base": {
+      "n_wells": 96,
+      "identical_bases": 73462,
+      "aligned_length": 77136,
+      "total_bitscore": 120047.0,
+      "mean_pident": 95.30469791666667,
+      "mean_bitscore": 1250.4895833333333,
+      "mean_coverage_ref": 0.11082758620689655,
+      "mean_coverage_read": 0.8725354615919437,
+      "mean_longest_perfect": 249.96875,
+      "median_longest_perfect": 244.0,
+      "mean_read_len": 920.9166666666666,
+      "total_gaps": 2226
+    },
+    "ema0.06": {
+      "n_wells": 96,
+      "identical_bases": 71146,
+      "aligned_length": 74183,
+      "total_bitscore": 118425.0,
+      "mean_pident": 95.938125,
+      "mean_bitscore": 1233.59375,
+      "mean_coverage_ref": 0.10658477011494252,
+      "mean_coverage_read": 0.8698934725114842,
+      "mean_longest_perfect": 245.28125,
+      "median_longest_perfect": 235.5,
+      "mean_read_len": 888.5625,
+      "total_gaps": 1907
+    },
+    "ema0.08": {
+      "n_wells": 96,
+      "identical_bases": 72195,
+      "aligned_length": 75448,
+      "total_bitscore": 119472.0,
+      "mean_pident": 95.72634375,
+      "mean_bitscore": 1244.5,
+      "mean_coverage_ref": 0.10840229885057472,
+      "mean_coverage_read": 0.8702924408485125,
+      "mean_longest_perfect": 249.4375,
+      "median_longest_perfect": 244.0,
+      "mean_read_len": 903.2708333333334,
+      "total_gaps": 1985
+    },
+    "ema0.14": {
+      "n_wells": 89,
+      "identical_bases": 69553,
+      "aligned_length": 73583,
+      "total_bitscore": 111340.0,
+      "mean_pident": 94.60152808988764,
+      "mean_bitscore": 1251.0112359550562,
+      "mean_coverage_ref": 0.11403796977915537,
+      "mean_coverage_read": 0.8655465014198498,
+      "mean_longest_perfect": 249.24719101123594,
+      "median_longest_perfect": 244,
+      "mean_read_len": 957.8089887640449,
+      "total_gaps": 2414
+    },
+    "pb0.012": {
+      "n_wells": 90,
+      "identical_bases": 71197,
+      "aligned_length": 75273,
+      "total_bitscore": 114303.0,
+      "mean_pident": 94.6553,
+      "mean_bitscore": 1270.0333333333333,
+      "mean_coverage_ref": 0.11536091954022988,
+      "mean_coverage_read": 0.879016258515228,
+      "mean_longest_perfect": 262.14444444444445,
+      "median_longest_perfect": 248.0,
+      "mean_read_len": 952.0555555555555,
+      "total_gaps": 2313
+    },
+    "pb0.030": {
+      "n_wells": 96,
+      "identical_bases": 71452,
+      "aligned_length": 74608,
+      "total_bitscore": 118506.0,
+      "mean_pident": 95.81384375,
+      "mean_bitscore": 1234.4375,
+      "mean_coverage_ref": 0.10719540229885058,
+      "mean_coverage_read": 0.8703420071699988,
+      "mean_longest_perfect": 239.79166666666666,
+      "median_longest_perfect": 231.0,
+      "mean_read_len": 893.15625,
+      "total_gaps": 1944
+    },
+    "pb0.045": {
+      "n_wells": 96,
+      "identical_bases": 69293,
+      "aligned_length": 72335,
+      "total_bitscore": 114912.0,
+      "mean_pident": 95.81191666666666,
+      "mean_bitscore": 1197.0,
+      "mean_coverage_ref": 0.10392959770114943,
+      "mean_coverage_read": 0.8573418611778949,
+      "mean_longest_perfect": 231.46875,
+      "median_longest_perfect": 213.0,
+      "mean_read_len": 882.15625,
+      "total_gaps": 1978
+    },
+    "bonus1.2": {
+      "n_wells": 95,
+      "identical_bases": 72500,
+      "aligned_length": 75751,
+      "total_bitscore": 120022.0,
+      "mean_pident": 95.74323157894737,
+      "mean_bitscore": 1263.3894736842105,
+      "mean_coverage_ref": 0.10998330308529945,
+      "mean_coverage_read": 0.8776990441679977,
+      "mean_longest_perfect": 261.65263157894736,
+      "median_longest_perfect": 245,
+      "mean_read_len": 909.0105263157894,
+      "total_gaps": 2026
+    },
+    "bonus2.1": {
+      "n_wells": 86,
+      "identical_bases": 66038,
+      "aligned_length": 69864,
+      "total_bitscore": 105805.0,
+      "mean_pident": 94.59510465116279,
+      "mean_bitscore": 1230.2906976744187,
+      "mean_coverage_ref": 0.1120513231756215,
+      "mean_coverage_read": 0.8641747419446362,
+      "mean_longest_perfect": 235.72093023255815,
+      "median_longest_perfect": 230.0,
+      "mean_read_len": 944.0348837209302,
+      "total_gaps": 2204
+    },
+    "win0.70_1.30": {
+      "n_wells": 95,
+      "identical_bases": 71614,
+      "aligned_length": 74712,
+      "total_bitscore": 118950.0,
+      "mean_pident": 95.88856842105263,
+      "mean_bitscore": 1252.1052631578948,
+      "mean_coverage_ref": 0.10847477313974592,
+      "mean_coverage_read": 0.8762960008545863,
+      "mean_longest_perfect": 265.38947368421054,
+      "median_longest_perfect": 271,
+      "mean_read_len": 897.7368421052631,
+      "total_gaps": 2022
+    },
+    "win0.82_1.18": {
+      "n_wells": 79,
+      "identical_bases": 55965,
+      "aligned_length": 59191,
+      "total_bitscore": 89728.0,
+      "mean_pident": 93.86722784810127,
+      "mean_bitscore": 1135.7974683544303,
+      "mean_coverage_ref": 0.10334526407682235,
+      "mean_coverage_read": 0.8024810342846795,
+      "mean_longest_perfect": 214.72151898734177,
+      "median_longest_perfect": 213,
+      "mean_read_len": 956.4177215189874,
+      "total_gaps": 1868
+    },
+    "nnw1200": {
+      "n_wells": 94,
+      "identical_bases": 71357,
+      "aligned_length": 74661,
+      "total_bitscore": 117773.0,
+      "mean_pident": 95.62021276595745,
+      "mean_bitscore": 1252.904255319149,
+      "mean_coverage_ref": 0.10955392516507703,
+      "mean_coverage_read": 0.8807505598870112,
+      "mean_longest_perfect": 251.0744680851064,
+      "median_longest_perfect": 244.0,
+      "mean_read_len": 903.3723404255319,
+      "total_gaps": 1954
+    },
+    "nnw2400": {
+      "n_wells": 94,
+      "identical_bases": 71217,
+      "aligned_length": 74501,
+      "total_bitscore": 117584.0,
+      "mean_pident": 95.6250744680851,
+      "mean_bitscore": 1250.8936170212767,
+      "mean_coverage_ref": 0.10931914893617022,
+      "mean_coverage_read": 0.8650746912803229,
+      "mean_longest_perfect": 253.9787234042553,
+      "median_longest_perfect": 244.5,
+      "mean_read_len": 919.563829787234,
+      "total_gaps": 1960
+    },
+    "no_comb": {
+      "n_wells": 96,
+      "identical_bases": 67984,
+      "aligned_length": 70536,
+      "total_bitscore": 114563.0,
+      "mean_pident": 96.40586458333333,
+      "mean_bitscore": 1193.3645833333333,
+      "mean_coverage_ref": 0.1013448275862069,
+      "mean_coverage_read": 0.876985478041919,
+      "mean_longest_perfect": 290.2395833333333,
+      "median_longest_perfect": 312.0,
+      "mean_read_len": 839.4791666666666,
+      "total_gaps": 1712
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "P_frac0.60": {
+    "mean_longest": 464.5520833333333,
+    "mean_pident": 97.92844791666667,
+    "mean_bitscore": 1107.9583333333333,
+    "n_gold_chosen": 7,
+    "oracle_mean_longest": 486.8541666666667
+  },
+  "P_frac0.75": {
+    "mean_longest": 447.0833333333333,
+    "mean_pident": 97.24163541666667,
+    "mean_bitscore": 1135.5,
+    "n_gold_chosen": 22,
+    "oracle_mean_longest": 486.8541666666667
+  },
+  "P_med": {
+    "mean_longest": 363.9375,
+    "mean_pident": 94.30414583333334,
+    "mean_bitscore": 1299.8229166666667,
+    "n_gold_chosen": 96,
+    "oracle_mean_longest": 486.8541666666667
+  },
+  "P_rank50": {
+    "mean_longest": 363.9375,
+    "mean_pident": 94.30414583333334,
+    "mean_bitscore": 1299.8229166666667,
+    "n_gold_chosen": 96,
+    "oracle_mean_longest": 486.8541666666667
+  },
+  "P_rank65": {
+    "mean_longest": 367.7291666666667,
+    "mean_pident": 94.38640625000001,
+    "mean_bitscore": 1295.78125,
+    "n_gold_chosen": 94,
+    "oracle_mean_longest": 486.8541666666667
+  }
+}
