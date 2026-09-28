@@ -237,6 +237,8 @@ def has_amplification(rsd_path, ref_positions, max_dist=30):
     Ch1 or Ch2 peak above a moderate threshold. This avoids missing valid
     amplification peaks that are dwarfed by taller fragment signals elsewhere.
     """
+    if not os.path.exists(rsd_path):
+        return False
     df = parse_rsd(rsd_path)
     for ch_name in ['Channel1', 'Channel2']:
         vals = df[ch_name].values.astype(float)
@@ -259,6 +261,8 @@ def has_amplification(rsd_path, ref_positions, max_dist=30):
 
 def find_is_peaks_for_well(rsd_path, ref_positions, match_tol=50):
     """Find IS peaks in a well by matching reference positions."""
+    if not os.path.exists(rsd_path):
+        return None
     df = parse_rsd(rsd_path)
     c3 = df['Channel3'].values.astype(float)
     noise = np.std(c3[:200]) if len(c3) > 200 else max(np.std(c3), 1.0)

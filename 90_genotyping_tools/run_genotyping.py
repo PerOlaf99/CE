@@ -72,7 +72,11 @@ def main():
     for folder_name in oy_folders:
         folder_path = os.path.join(OY_DIR, folder_name)
         rsd_files = sorted(glob.glob(os.path.join(folder_path, '*.rsd')))
-        folder_wells = 0
+
+        # Pass 1: extract features for all wells in this folder.
+        # The model was trained on per-plate median/IQR-normalized features,
+        # so the SAME normalization must be applied at inference time.
+        well_rows = {}
         for rsd_path in rsd_files:
             well = os.path.splitext(os.path.basename(rsd_path))[0]
             key = (folder_name, well)
@@ -84,20 +88,43 @@ def main():
                 if len(df) < 50:
                     continue
                 isp = [(s, float(df['Channel3'].values[s])) for s in scans if s < len(df)]
+                if len(isp) < 2:
+                    continue
                 feats = extract_features_from_trace(df, is_peaks=isp)
-                row_vec = [feats.get(f, 0.0) for f in ref_features]
-                X = np.array([row_vec])
-                y_prob = gen_model.predict_proba(X)
-                y_pred = gen_model.predict(X)
-                pred_orig = LABEL_UNMAP.get(int(y_pred[0]), int(y_pred[0]))
-                conf = float(np.max(y_prob[0]))
-                results.append({
-                    'folder': folder_name, 'well': well,
-                    'prediction': pred_orig, 'confidence': round(conf, 3),
-                })
-                folder_wells += 1
+                row_vec = np.array([feats.get(f, 0.0) for f in ref_features], dtype=float)
+                well_rows[well] = row_vec
             except Exception:
                 continue
+
+        if not well_rows:
+            print(f"  {folder_name}: 0/{len(rsd_files)} wells")
+            continue
+
+        # Per-plate normalization stats over ALL typed wells (same as training)
+        feat_matrix = np.array(list(well_rows.values()))
+        median = np.median(feat_matrix, axis=0)
+        p75 = np.percentile(feat_matrix, 75, axis=0)
+        p25 = np.percentile(feat_matrix, 25, axis=0)
+        iqr = np.maximum(p75 - p25, 1e-8)
+
+        # Pass 2: normalize and predict
+        folder_wells = 0
+        for well in sorted(well_rows):
+            X_norm = (well_rows[well].reshape(1, -1) - median) / iqr
+            y_prob = gen_model.predict_proba(X_norm)
+            y_pred = gen_model.predict(X_norm)
+            pred_orig = LABEL_UNMAP.get(int(y_pred[0]), int(y_pred[0]))
+            conf = float(np.max(y_prob[0]))
+            prob_map = dict(zip(gen_model.classes_, y_prob[0]))
+            results.append({
+                'folder': folder_name, 'well': well,
+                'prediction': pred_orig, 'confidence': round(conf, 3),
+                'prob_fail': round(float(prob_map.get(0, 0)), 4),
+                'prob_hom1': round(float(prob_map.get(1, 0)), 4),
+                'prob_hom2': round(float(prob_map.get(2, 0)), 4),
+                'prob_het': round(float(prob_map.get(4, 0)), 4),
+            })
+            folder_wells += 1
         print(f"  {folder_name}: {folder_wells}/{len(rsd_files)} wells")
 
     if results:
