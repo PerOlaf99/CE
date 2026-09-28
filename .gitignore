@@ -35,6 +35,7 @@ base_caller_model_combined_checkpoint.keras
 base_caller_model_matched_confidence.csv
 base_caller_model_with_bg_confidence.csv
 *.npz
+!BEST_BASECALLER_RELEASE/assets/*.npz
 *.h5
 env/
 
