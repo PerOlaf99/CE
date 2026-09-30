@@ -328,7 +328,12 @@ def load_esd(path: Path, base_order: str = "TGCA", rsd_fallback: Optional[Path] 
 
 
 def load_abd(path: Path, base_order: str = "CAGT") -> TraceDocument:
-    """Load an analyzed .abd ABIF container (DLL basecall + processed trace)."""
+    """Load an analyzed .abd ABIF container (DLL basecall + processed trace).
+
+    Reads the per-base quality record ``QVAL2`` (0-255 bytes) written by
+    :func:`export_abd` when present, so the display gets data + bases +
+    quality from one self-contained file.
+    """
     if read_abd is None:
         raise RuntimeError("abd_io not available")
     abd = read_abd(str(path))
@@ -337,10 +342,36 @@ def load_abd(path: Path, base_order: str = "CAGT") -> TraceDocument:
     pos = np.asarray(abd.peak_positions, float)
     if len(pos) < len(seq):
         pos = np.arange(len(seq)).astype(float)
+
+    qualities: List[float] = [0.0] * len(seq)
+    try:
+        if path.stat().st_size >= 30:
+            raw = path.read_bytes()
+            from struct import unpack
+            doff = unpack(">I", raw[26:30])[0]
+            nelem = unpack(">I", raw[16:20])[0]
+            for i in range(min(nelem, 400)):
+                off = doff + i * 28
+                if off + 28 > len(raw):
+                    break
+                name = raw[off:off + 4].decode("ascii", "replace")
+                num, _et, _es, _ne, dsize, d_off, _ = unpack(
+                    ">IHHIIII", raw[off + 4:off + 28])
+                if not name.isidentifier():
+                    break
+                if f"{name}{num}" == "QVAL2" and dsize > 0 and d_off >= 0 \
+                        and d_off + dsize <= len(raw):
+                    qv = np.frombuffer(raw[d_off:d_off + dsize],
+                                       dtype=np.uint8).astype(float)
+                    qualities = [float(v) for v in qv[: len(seq)]]
+                    break
+    except Exception:
+        qualities = [0.0] * len(seq)
+
     return TraceDocument(
         path=path, well=path.stem, raw=acgt.copy(), base_order="ACGT", acgt=acgt,
         sequence=str(seq), peak_positions=[int(p) for p in pos[: len(seq)]],
-        qualities=[0.0] * len(seq),
+        qualities=qualities,
     )
 
 
@@ -621,8 +652,13 @@ def export_scf(doc: TraceDocument, out: Path) -> None:
 
 
 def export_abd(doc: TraceDocument, out: Path, base_order: str = "CAGT") -> None:
-    """Write an ABIF (.abd) container with raw + processed traces and the
-    called sequence (readable back with cimarron_basecaller.abd_io)."""
+    """Write an ABIF (.abd) container with raw + processed traces, the
+    called sequence, peak positions, and per-base quality.
+
+    Records: DATA1-4 raw trace, DATA9-12 processed trace, PLOC2 peak
+    positions, PBAS2 bases (all cimarron_basecaller.abd_io readable), plus
+    QVAL2 per-base quality scores (0-255 bytes) read back by load_abd.
+    """
     _ABL_LETTER = {0: "C", 1: "A", 2: "G", 3: "T"}
 
     raw = doc.acgt if doc.acgt.size else np.empty((0, 4))
@@ -653,18 +689,26 @@ def export_abd(doc: TraceDocument, out: Path, base_order: str = "CAGT") -> None:
         col = raw_abd[:, i - 1] if raw_abd.size else np.zeros(0)
         arr = np.nan_to_num(col).astype(">i2")
         blob = arr.tobytes()
-        dir_entries.append(("DATA", i, 2, 2, len(arr), blob))
+        dir_entries.append(("DATA", i, 4, 2, len(arr), blob))
         blobs.append(blob)
     for i in range(9, 13):
         col = proc_abd[:, i - 9] if proc_abd.size else np.zeros(0)
         arr = np.nan_to_num(col).astype(">i2")
         blob = arr.tobytes()
-        dir_entries.append(("DATA", i, 2, 2, len(arr), blob))
+        dir_entries.append(("DATA", i, 4, 2, len(arr), blob))
         blobs.append(blob)
-    dir_entries.append(("PLOC", 2, 4, 4, len(pos), pos.astype(">i4").tobytes()))
+    dir_entries.append(("PLOC", 2, 4, 2, len(pos), pos.astype(">i2").tobytes()))
     blobs.append(dir_entries[-1][5])
     dir_entries.append(("PBAS", 2, 1, 1, len(bases_bytes), bases_bytes))
     blobs.append(dir_entries[-1][5])
+
+    # Per-base quality (QVAL2, 0-255) - only when the caller provided scores
+    qa = np.asarray(doc.qualities[: len(doc.sequence)], dtype=float) \
+        if doc.qualities else np.array([])
+    if qa.size:
+        q_byte = np.clip(np.round(qa), 0, 255).astype(np.uint8).tobytes()
+        dir_entries.append(("QVAL", 2, 1, 1, len(q_byte), q_byte))
+        blobs.append(dir_entries[-1][5])
 
     # layout: header (30 bytes: 4 magic + version + nelem + ...), pad to 30,
     # then tdir at offset 26 read by the reader. Build: magic 4 + 2 version +
