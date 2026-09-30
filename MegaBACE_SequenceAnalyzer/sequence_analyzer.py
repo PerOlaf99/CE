@@ -85,6 +85,26 @@ TRACE_THEMES = {
     "Monochrome": {"A": "#777777", "C": "#555555", "G": "#333333", "T": "#888888"},
 }
 
+LIMONCELLO = dict(
+    bg="#FFF7E0",          # warm cream background
+    panel="#FFFBE9",       # panel / frame fill
+    lemon="#F7D94C",       # limoncello yellow accent (buttons, active tabs)
+    lemon_hi="#FFE87C",    # hover / pressed-highlight lemon
+    lime="#B7D944",        # lime-green accent (selection, focus)
+    lime_hi="#C8E46A",     # soft lime highlight
+    olive="#6B7322",       # olive-green label text
+    ink="#4A4306",         # near-black warm text
+    amber="#E8B93C",       # dark amber (borders, pressed)
+    field="#FFFCEB",       # entry / spinbox / combobox field
+    trough="#F3E7B8",      # scale trough
+    border="#D8C875",      # light golden border
+    tree_bg="#FFFBE9",     # treeview rows
+    tree_sel="#DCEB8E",    # treeview selected row (lime wash)
+    heading="#EFE6B0",     # treeview column headers
+    disabled="#EDE7CF",    # disabled button / widget
+    figure="#FFFDF2",      # matplotlib figure facecolor
+)
+
 DATA_STORAGE_FILE = Path(__file__).with_name("seq_analyzer_storage.json")
 
 
@@ -181,6 +201,7 @@ class SequenceAnalyzerApp(tk.Tk):
         self.title("MegaBACE Sequence Analyzer")
         self.geometry("1560x960")
         self.minsize(1120, 760)
+        self._apply_limoncello_theme()
 
         storage = _load_storage_settings()
         self.raw_storage = storage.get("raw", "")
@@ -191,9 +212,10 @@ class SequenceAnalyzerApp(tk.Tk):
         self.docs: dict[str, TraceDocument] = {}
         self.selected: List[Path] = []
         self.settings = AnalysisSettings()
-        self.n_graphs = tk.IntVar(value=2)
+        self.n_graphs = tk.IntVar(value=8)
         self.rows_wrap = tk.IntVar(value=4)
         self.view_mode = tk.StringVar(value="processed")
+        self.trace_layout = tk.StringVar(value="pair")  # raw | processed | pair
         self.basecaller = tk.StringVar(value="pos_bonus07")
         self.left_cutoff = tk.IntVar(value=0)
         self.status_var = tk.StringVar(value="Ready — add a data folder to begin")
@@ -219,6 +241,68 @@ class SequenceAnalyzerApp(tk.Tk):
             self.refresh_file_list()
             self.folder_list.selection_set(0)
         self.after(120, self.try_auto_load_plate)
+
+    def _apply_limoncello_theme(self):
+        """Warm limoncello (lemon/lime) skin over the default ttk clam theme."""
+        L = LIMONCELLO
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure("TFrame", background=L["panel"])
+        style.configure("TLabel", background=L["panel"], foreground=L["ink"])
+        style.configure("TLabelframe", background=L["panel"],
+                        bordercolor=L["border"], relief="groove")
+        style.configure("TLabelframe.Label", background=L["panel"],
+                        foreground=L["olive"])
+        style.configure("TButton", background=L["lemon"], foreground=L["ink"],
+                        bordercolor=L["border"], lightcolor=L["lemon_hi"],
+                        darkcolor=L["amber"], focuscolor=L["lime"], padding=(8, 3))
+        style.map("TButton",
+                  background=[("pressed", L["amber"]), ("active", L["lemon_hi"]),
+                              ("disabled", L["disabled"])],
+                  foreground=[("disabled", "#9A9170")])
+        style.configure("TCheckbutton", background=L["panel"], foreground=L["ink"])
+        style.map("TCheckbutton",
+                  background=[("active", L["panel"]), ("selected", L["panel"])])
+        style.configure("TRadiobutton", background=L["panel"], foreground=L["ink"])
+        style.map("TRadiobutton", background=[("active", L["panel"])])
+        style.configure("TNotebook", background=L["bg"], bordercolor=L["amber"],
+                        tabmargins=(4, 6, 4, 0))
+        style.configure("TNotebook.Tab", background=L["panel"], foreground=L["olive"],
+                        padding=(12, 5), bordercolor=L["amber"])
+        style.map("TNotebook.Tab",
+                  background=[("selected", L["lemon"])],
+                  foreground=[("selected", L["ink"])])
+        style.configure("Treeview", background=L["tree_bg"],
+                        fieldbackground=L["tree_bg"], foreground=L["ink"],
+                        bordercolor=L["border"], rowheight=22)
+        style.map("Treeview", background=[("selected", L["tree_sel"])],
+                  foreground=[("selected", L["ink"])])
+        style.configure("Treeview.Heading", background=L["heading"],
+                        foreground=L["olive"], bordercolor=L["border"], relief="flat")
+        style.map("Treeview.Heading", background=[("active", L["lemon_hi"])])
+        style.configure("TSpinbox", fieldbackground=L["field"], foreground=L["ink"],
+                        background=L["panel"], bordercolor=L["border"],
+                        arrowcolor=L["olive"])
+        style.configure("TCombobox", fieldbackground=L["field"], foreground=L["ink"],
+                        background=L["panel"], bordercolor=L["border"],
+                        arrowcolor=L["olive"])
+        style.map("TCombobox", fieldbackground=[("readonly", L["field"])])
+        style.configure("TEntry", fieldbackground=L["field"], foreground=L["ink"],
+                        bordercolor=L["border"])
+        style.configure("TScale", background=L["panel"], troughcolor=L["trough"],
+                        bordercolor=L["border"])
+        style.map("TScale", troughcolor=[("active", L["trough"])])
+        style.configure("TScrollbar", background=L["lemon"], troughcolor=L["bg"],
+                        bordercolor=L["border"], arrowcolor=L["olive"])
+        style.configure("TSeparator", background=L["border"])
+        style.configure("TProgressbar", background=L["lime"], troughcolor=L["trough"],
+                        bordercolor=L["border"])
+
+        self.configure(bg=L["bg"])
 
     # ------------------------------------------------------------------ UI
     def _bind_shortcuts(self):
@@ -255,6 +339,18 @@ class SequenceAnalyzerApp(tk.Tk):
         edit_m = tk.Menu(menubar, tearoff=0)
         edit_m.add_command(label="Select All Samples  Ctrl+A", command=self.select_all)
         menubar.add_cascade(label="Edit", menu=edit_m)
+
+        disp_m = tk.Menu(menubar, tearoff=0)
+        disp_m.add_radiobutton(label="Processed traces",
+                               variable=self.trace_layout, value="processed",
+                               command=self.redraw_wrap)
+        disp_m.add_radiobutton(label="Raw traces",
+                               variable=self.trace_layout, value="raw",
+                               command=self.redraw_wrap)
+        disp_m.add_radiobutton(label="Raw + Processed (pair per well)",
+                               variable=self.trace_layout, value="pair",
+                               command=self.redraw_wrap)
+        menubar.add_cascade(label="Display", menu=disp_m)
 
         opt_m = tk.Menu(menubar, tearoff=0)
         opt_m.add_command(label="Data storage…", command=self.data_storage_dialog)
@@ -337,6 +433,7 @@ class SequenceAnalyzerApp(tk.Tk):
         ttk.Label(bar2, text="Display:").pack(side=tk.LEFT)
         self._tb_btn(bar2, "Raw Trace", lambda: self.set_view("raw"))
         self._tb_btn(bar2, "Processed Trace", lambda: self.set_view("processed"))
+        self._tb_btn(bar2, "Raw+Proc", lambda: self.set_trace_layout("pair"))
         self._tb_btn(bar2, "Remove Trace(s)", self.remove_traces)
         self._tb_btn(bar2, "Remove All", self.remove_all)
         ttk.Separator(bar2, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=4)
@@ -687,6 +784,11 @@ class SequenceAnalyzerApp(tk.Tk):
         self.reset_zoom()
         self.redraw()
 
+    def set_trace_layout(self, layout: str):
+        self.trace_layout.set(layout)
+        self.reset_zoom()
+        self.redraw()
+
     def reset_zoom(self):
         self._zoom = {"x": (None, None), "y": (None, None)}
 
@@ -938,14 +1040,29 @@ class SequenceAnalyzerApp(tk.Tk):
             return
 
         settings = self._settings_from_ui()
-        for i, path in enumerate(paths):
-            ax = self.fig.add_subplot(len(paths), 1, i + 1)
+        layout = self.trace_layout.get()
+        if layout == "pair":
+            tasks = []
+            for path in paths[:4]:
+                tasks.append((path, "raw"))
+                tasks.append((path, "processed"))
+        else:
+            tasks = [(path, layout) for path in paths]
+
+        for i, (path, mode) in enumerate(tasks):
+            ax = self.fig.add_subplot(len(tasks), 1, i + 1)
             try:
                 doc = self._ensure_doc(path)
             except Exception as e:
                 ax.text(0.5, 0.5, f"Load error: {e}", ha="center", transform=ax.transAxes)
                 continue
-            tr = display_trace(doc, settings)
+            if mode == "raw":
+                tr = doc.raw
+            elif layout == "pair":
+                vs = settings.view_mode if settings.view_mode != "raw" else "processed"
+                tr = display_trace(doc, AnalysisSettings(**{**settings.__dict__, "view_mode": vs}))
+            else:
+                tr = display_trace(doc, settings)
             s0, s1 = self._signal_bounds(doc, settings)
             if s1 <= s0:
                 s1 = tr.shape[0]
@@ -960,12 +1077,11 @@ class SequenceAnalyzerApp(tk.Tk):
                 ax.text(0.5, 0.5, "(all channels hidden)",
                         ha="center", va="center", transform=ax.transAxes, color="#888")
             # quality profile on twin axis (blue-green = good, brown = poor)
-            qd = getattr(doc, "quality", None)
             pos_peaks = np.asarray(doc.peak_positions, dtype=float)
             qq = np.asarray(doc.qualities[: len(pos_peaks)], dtype=float) \
                 if doc.qualities else np.array([])
-            if (self.show_qcurve.get() and len(qq) == len(pos_peaks) and qq.size
-                    and settings.view_mode not in ("raw",)):
+            if (self.show_qcurve.get() and mode != "raw" and len(qq) == len(pos_peaks)
+                    and qq.size):
                 ax2 = ax.twinx()
                 good_c = qq >= 30.0
                 if good_c.any():
@@ -977,18 +1093,18 @@ class SequenceAnalyzerApp(tk.Tk):
                 ax2.set_ylim(0, 100)
                 ax2.yaxis.set_label_position("right")
 
-            ax.set_ylabel(doc.well, fontsize=8)
+            suffix = " raw" if mode == "raw" else (" proc" if layout == "pair" else "")
+            ax.set_ylabel(f"{doc.well}{suffix}", fontsize=8)
             ax.tick_params(labelsize=7)
             if i == 0 and plotted:
                 ax.legend(loc="upper right", fontsize=7, ncol=4)
-            if i == len(paths) - 1:
+            if i == len(tasks) - 1:
                 ax.set_xlabel("Scan")
             else:
                 ax.set_xlabel("")
 
-            if doc.sequence and settings.view_mode in ("called", "baseline",
-                                                       "spectral", "normalize",
-                                                       "band", "mobility") and doc.peak_positions:
+            if (mode != "raw" and settings.view_mode != "raw" and doc.sequence
+                    and doc.peak_positions):
                 seq = doc.sequence
                 q = np.asarray(doc.qualities[: len(seq)], dtype=float) if doc.qualities else np.array([])
                 pos = np.asarray(doc.peak_positions[: len(seq)], dtype=float)
